@@ -1,6 +1,46 @@
 import { useEffect, useState } from 'react'
+import {
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Scatter,
+  ScatterChart,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
 
 const API_BASE = 'http://localhost:4000/api/clients'
+
+// Categorical palette, slots 1-2 (validated for scatter/all-pairs use in
+// dataviz skill's references/palette.md) - refinancing_flag has only two
+// values so it stays within the palette's validated series cap for scatter
+// charts (sector, at 7 values, would exceed it).
+const REFI_COLORS = {
+  true: '#eb6834', // slot 2, orange
+  false: '#2a78d6', // slot 1, blue
+}
+
+function Nav({ view, onNavigate }) {
+  return (
+    <nav>
+      <button
+        type="button"
+        onClick={() => onNavigate('table')}
+        disabled={view === 'table'}
+      >
+        Table
+      </button>{' '}
+      <button
+        type="button"
+        onClick={() => onNavigate('heatmap')}
+        disabled={view === 'heatmap'}
+      >
+        Heatmap
+      </button>
+    </nav>
+  )
+}
 
 function ClientTable({ clients, onSelectClient }) {
   return (
@@ -38,6 +78,76 @@ function ClientTable({ clients, onSelectClient }) {
   )
 }
 
+function HeatmapTooltip({ active, payload }) {
+  if (!active || !payload || !payload.length) return null
+  const client = payload[0].payload
+  return (
+    <div
+      style={{
+        background: '#fcfcfb',
+        border: '1px solid #c3c2b7',
+        padding: '8px',
+      }}
+    >
+      <strong>
+        {client.entity_name} ({client.entity_id})
+      </strong>
+      <div>Sector: {client.sector}</div>
+      <div>Wallet Gap (ZAR): {client.wallet_gap_zar}</div>
+      <div>Opportunity Score: {client.opportunity_score}</div>
+      <div>Refinancing Flag: {String(client.refinancing_flag)}</div>
+    </div>
+  )
+}
+
+function OpportunityHeatmap({ clients, onSelectClient }) {
+  const refinancing = clients.filter((c) => c.refinancing_flag)
+  const notRefinancing = clients.filter((c) => !c.refinancing_flag)
+
+  return (
+    <>
+      <h1>Opportunity Heatmap</h1>
+      <p>Wallet gap vs. opportunity score, colored by refinancing flag.</p>
+      <ResponsiveContainer width="100%" height={500}>
+        <ScatterChart margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
+          <CartesianGrid stroke="#e1e0d9" />
+          <XAxis
+            type="number"
+            dataKey="wallet_gap_zar"
+            name="Wallet Gap (ZAR)"
+            stroke="#898781"
+          />
+          <YAxis
+            type="number"
+            dataKey="opportunity_score"
+            name="Opportunity Score"
+            stroke="#898781"
+          />
+          <Tooltip
+            cursor={{ strokeDasharray: '3 3' }}
+            content={<HeatmapTooltip />}
+          />
+          <Legend />
+          <Scatter
+            name="Refinancing: false"
+            data={notRefinancing}
+            fill={REFI_COLORS.false}
+            onClick={(point) => onSelectClient(point.entity_id)}
+            cursor="pointer"
+          />
+          <Scatter
+            name="Refinancing: true"
+            data={refinancing}
+            fill={REFI_COLORS.true}
+            onClick={(point) => onSelectClient(point.entity_id)}
+            cursor="pointer"
+          />
+        </ScatterChart>
+      </ResponsiveContainer>
+    </>
+  )
+}
+
 function ClientDetail({ entityId, onBack }) {
   const [client, setClient] = useState(null)
   const [error, setError] = useState(null)
@@ -61,7 +171,7 @@ function ClientDetail({ entityId, onBack }) {
   return (
     <>
       <button type="button" onClick={onBack}>
-        &larr; Back to table
+        &larr; Back
       </button>
 
       {loading && <p>Loading client...</p>}
@@ -134,7 +244,9 @@ function App() {
   const [clients, setClients] = useState([])
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [view, setView] = useState('table') // 'table' | 'heatmap' | 'detail'
   const [selectedEntityId, setSelectedEntityId] = useState(null)
+  const [previousView, setPreviousView] = useState('table')
 
   useEffect(() => {
     fetch(API_BASE)
@@ -149,19 +261,42 @@ function App() {
       .finally(() => setLoading(false))
   }, [])
 
+  const handleSelectClient = (entityId) => {
+    setPreviousView(view)
+    setSelectedEntityId(entityId)
+    setView('detail')
+  }
+
+  const handleNavigate = (nextView) => {
+    setView(nextView)
+  }
+
   if (loading) return <p>Loading clients...</p>
   if (error) return <p>Failed to load clients: {error}</p>
 
-  if (selectedEntityId) {
-    return (
-      <ClientDetail
-        entityId={selectedEntityId}
-        onBack={() => setSelectedEntityId(null)}
-      />
-    )
-  }
+  return (
+    <>
+      {view !== 'detail' && <Nav view={view} onNavigate={handleNavigate} />}
 
-  return <ClientTable clients={clients} onSelectClient={setSelectedEntityId} />
+      {view === 'table' && (
+        <ClientTable clients={clients} onSelectClient={handleSelectClient} />
+      )}
+
+      {view === 'heatmap' && (
+        <OpportunityHeatmap
+          clients={clients}
+          onSelectClient={handleSelectClient}
+        />
+      )}
+
+      {view === 'detail' && (
+        <ClientDetail
+          entityId={selectedEntityId}
+          onBack={() => setView(previousView)}
+        />
+      )}
+    </>
+  )
 }
 
 export default App
