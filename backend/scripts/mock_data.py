@@ -142,7 +142,7 @@ def main():
 
         record = {
             "entity_id": entity_id,
-            "client_name": name,
+            "entity_name": name,
             "sector": sector,
             **pillars,
             "estimated_total_wallet_zar": estimated_total_wallet_zar,
