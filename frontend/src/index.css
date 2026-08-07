@@ -1,1 +1,408 @@
-/* Intentionally empty for now - no styling yet. */
+/* ---------------------------------------------------------------------
+   Design tokens
+   Sourced from the dataviz skill's reference palette (references/palette.md)
+   so the app chrome and the heatmap chart share one system. Light mode is
+   primary; dark follows prefers-color-scheme using the same validated
+   categorical steps.
+------------------------------------------------------------------------ */
+
+:root {
+  --surface-1: #fcfcfb; /* card / table / chart surface */
+  --page-plane: #f9f9f7; /* app background */
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --gridline: #e1e0d9;
+  --baseline: #c3c2b7;
+  --border-hairline: rgba(11, 11, 11, 0.1);
+
+  --accent: #2a78d6; /* categorical slot 1 - blue */
+  --accent-wash: rgba(42, 120, 214, 0.08);
+  --series-2: #eb6834; /* categorical slot 2 - orange (refinancing: true) */
+
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-warning-ink: #7a4b00;
+  --status-serious: #ec835a;
+  --status-serious-ink: #7a2c0f;
+  --status-critical: #d03b3b;
+
+  --radius: 8px;
+  --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface-1: #1a1a19;
+    --page-plane: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --gridline: #2c2c2a;
+    --baseline: #383835;
+    --border-hairline: rgba(255, 255, 255, 0.1);
+
+    --accent: #3987e5;
+    --accent-wash: rgba(57, 135, 229, 0.12);
+    --series-2: #d95926;
+
+    --status-warning-ink: #ffd479;
+    --status-serious-ink: #ffb499;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--page-plane);
+  color: var(--text-primary);
+  font: 14px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--sans);
+  font-weight: 600;
+  margin: 0;
+}
+
+table {
+  border-collapse: collapse;
+}
+
+button {
+  font: inherit;
+}
+
+/* ---------------------------------------------------------------------
+   App shell
+------------------------------------------------------------------------ */
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.app-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 32px;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.app-title {
+  font-size: 20px;
+  letter-spacing: -0.2px;
+}
+
+.app-header-meta {
+  color: var(--text-muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.app-nav {
+  display: flex;
+  gap: 4px;
+  padding: 0 32px;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.nav-tab {
+  appearance: none;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 12px 4px;
+  margin: 0 12px 0 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.nav-tab:hover {
+  color: var(--text-primary);
+}
+
+.nav-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.view-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 28px 32px 48px;
+}
+
+.view-heading {
+  margin-bottom: 4px;
+}
+
+.view-subtitle {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin: 4px 0 20px;
+}
+
+/* ---------------------------------------------------------------------
+   Panels / cards
+------------------------------------------------------------------------ */
+
+.panel {
+  background: var(--surface-1);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius);
+}
+
+/* ---------------------------------------------------------------------
+   Data table
+------------------------------------------------------------------------ */
+
+.data-table {
+  width: 100%;
+  font-size: 13px;
+}
+
+.data-table th,
+.data-table td {
+  padding: 10px 16px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.data-table thead th {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--baseline);
+}
+
+.data-table tbody tr {
+  border-bottom: 1px solid var(--gridline);
+  cursor: pointer;
+}
+
+.data-table tbody tr:last-child {
+  border-bottom: none;
+}
+
+.data-table tbody tr:hover {
+  background: var(--accent-wash);
+}
+
+.data-table td.numeric,
+.data-table th.numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-table td.entity-name {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.data-table td.sector {
+  color: var(--text-secondary);
+}
+
+/* ---------------------------------------------------------------------
+   Badges
+------------------------------------------------------------------------ */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.badge-neutral {
+  background: var(--gridline);
+  color: var(--text-secondary);
+}
+
+.badge-warning {
+  background: color-mix(in srgb, var(--status-warning) 22%, var(--surface-1));
+  color: var(--status-warning-ink);
+}
+
+.badge-serious {
+  background: color-mix(in srgb, var(--status-serious) 22%, var(--surface-1));
+  color: var(--status-serious-ink);
+}
+
+/* ---------------------------------------------------------------------
+   Detail view
+------------------------------------------------------------------------ */
+
+.back-link {
+  appearance: none;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0 0 16px;
+}
+
+.back-link:hover {
+  color: var(--accent);
+}
+
+.detail-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.detail-header .entity-id {
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+.detail-sector-tag {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--gridline);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.detail-section {
+  margin-top: 24px;
+  padding: 20px 24px;
+}
+
+.detail-section h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 20px;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.stat-value {
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-value.accent {
+  color: var(--accent);
+}
+
+.pillar-row {
+  display: grid;
+  grid-template-columns: 160px 1fr 56px;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.pillar-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.pillar-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--accent-wash);
+  overflow: hidden;
+}
+
+.pillar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+}
+
+.pillar-value {
+  text-align: right;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.flags-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.flag-item .stat-label {
+  margin-bottom: 8px;
+}
+
+/* ---------------------------------------------------------------------
+   Heatmap
+------------------------------------------------------------------------ */
+
+.chart-card {
+  padding: 24px 24px 12px;
+}
+
+.chart-tooltip {
+  background: var(--surface-1);
+  border: 1px solid var(--border-hairline);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
+.chart-tooltip strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.chart-tooltip div {
+  color: var(--text-secondary);
+}
+
+/* ---------------------------------------------------------------------
+   Loading / error states
+------------------------------------------------------------------------ */
+
+.state-message {
+  padding: 48px 32px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
