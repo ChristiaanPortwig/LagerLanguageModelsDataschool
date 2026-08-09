@@ -219,8 +219,12 @@ __marimo__/
 
 #Custom
 data/
+*.pdf
 *.csv
 
 # Node
 node_modules/
 npm-debug.log*
+data/*
+*.csv
+*.parquet
