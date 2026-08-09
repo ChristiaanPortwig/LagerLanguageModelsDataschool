@@ -9,4 +9,5 @@
 - Before running models... make sure we always have newest data
 - When scraping, we can use crawl4ai as a fallback. Lets investigate
 - Who to meet section in dashboard - Who should the banker make contact with??
+- SENS data needs to be downloaded daily
 
