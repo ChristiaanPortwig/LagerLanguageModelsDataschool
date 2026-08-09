@@ -1,5 +1,6 @@
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
+from datetime import datetime
 import html
 import logging
 import re
@@ -32,18 +33,21 @@ class DataCollector:
             "annual financial statements",
             "financial statements",
             "afs",
+            "form 20-f",
         ],
         "interim_results": [
             "interim results",
             "half year results",
             "half-year results",
             "interim financial statements",
+            "earnings release",
             "results"
         ],
         "results_presentation": [
             "results presentation",
             "annual results presentation",
             "interim results presentation",
+            "earnings release presentation",
         ],
     }
 
@@ -121,6 +125,17 @@ class DataCollector:
                 "https://www.shaftesburycapital.com/content/dam/shaftesbury/"
                 "corporate/new-build/doucments/investor/results---reports/"
                 "2025/interim-results-2025-presentation.pdf.downloadasset.pdf",
+            ),
+        ],
+    }
+
+    EXTRA_DOCUMENTS = {
+        INVESTOR_URLS["Anglo American"]: [
+            (
+                "Integrated Annual Report 2025 annual financial statements",
+                "https://www.angloamerican.com/~/media/Files/A/"
+                "Anglo-American-Group-v9/PLC/investors/annual-reporting/"
+                "2025/aa-annual-report-full-2025.pdf",
             ),
         ],
     }
@@ -219,6 +234,23 @@ class DataCollector:
         pages_to_follow = []
 
         def add_matches(href, text):
+            parsed_href = urlparse(href)
+
+            # Viewer links return HTML. Use their underlying PDF directly.
+            if parsed_href.path.lower().endswith("pdf-viewer.aspx"):
+                source = parse_qs(parsed_href.query).get("src", [])
+                if source:
+                    href = urljoin(href, source[0])
+                    parsed_href = urlparse(href)
+
+            # Transcripts, scripts and Q&A packs are supporting material, not
+            # the result/report documents this collector is intended to save.
+            path = parsed_href.path.lower()
+            if any(part in path for part in (
+                "q-and-a", "q&a", "transcript", "results-script",
+            )):
+                return
+
             combined = f"{text} {href}".lower()
 
             for document_type, keywords in self.KEYWORDS.items():
@@ -232,7 +264,7 @@ class DataCollector:
                         "score": score,
                     })
 
-            if re.search(r"(?:^|[-_/])(?:iar|ir)(?:[-_.])", urlparse(href).path.lower()):
+            if re.search(r"(?:^|[-_/])(?:iar|ir)(?:[-_.])", path):
                 matches.append({
                     "type": "annual_report",
                     "url": href,
@@ -279,6 +311,9 @@ class DataCollector:
                 res.text[start:found.end() + 50], "html.parser"
             ).get_text(" ", strip=True)
             add_matches(href, context)
+
+        for text, href in self.EXTRA_DOCUMENTS.get(url, []):
+            add_matches(href, text)
 
         found_types = {match["type"] for match in matches}
         missing_types = set(self.KEYWORDS) - found_types
@@ -387,10 +422,27 @@ class DataCollector:
         LOGGER.info("%s: evaluating %d document candidates", company_name, len(docs))
 
         downloaded_types = set()
+        accepted_years = {datetime.now().year, datetime.now().year - 1}
 
         for doc in docs:
             #Download hightest score
             if doc["type"] in downloaded_types:
+                continue
+
+            document_years = {
+                int(year)
+                for year in re.findall(
+                    r"\b(?:19|20)\d{2}\b",
+                    doc["link_text"] + " " + doc["url"],
+                )
+            }
+            if document_years and not document_years.intersection(accepted_years):
+                LOGGER.info(
+                    "%s: skipping stale %s candidate from %s",
+                    company_name,
+                    doc["type"],
+                    max(document_years),
+                )
                 continue
 
             parsed = urlparse(doc["url"]) 
