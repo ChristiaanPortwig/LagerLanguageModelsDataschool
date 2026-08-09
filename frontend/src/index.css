@@ -296,12 +296,21 @@ button {
   padding: 20px 24px;
 }
 
-.detail-section h2 {
+.detail-section h2,
+.section-heading {
   font-size: 13px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--text-muted);
   margin-bottom: 16px;
+}
+
+.section-heading {
+  margin-top: 24px;
+}
+
+.section-heading:first-of-type {
+  margin-top: 0;
 }
 
 .stat-grid {

@@ -42,7 +42,7 @@ function Header({ clientCount }) {
   )
 }
 
-function Nav({ view, onNavigate }) {
+function Nav({ view, onNavigate, flaggedCount }) {
   return (
     <nav className="app-nav">
       <button
@@ -58,6 +58,13 @@ function Nav({ view, onNavigate }) {
         onClick={() => onNavigate('heatmap')}
       >
         Heatmap
+      </button>
+      <button
+        type="button"
+        className={`nav-tab ${view === 'flags' ? 'active' : ''}`}
+        onClick={() => onNavigate('flags')}
+      >
+        Flags{flaggedCount != null ? ` (${flaggedCount})` : ''}
       </button>
     </nav>
   )
@@ -192,6 +199,93 @@ function FlagBadge({ active, variant, activeLabel, inactiveLabel }) {
   return <span className="badge badge-neutral">{inactiveLabel}</span>
 }
 
+function ProactiveFlags({ clients, onSelectClient }) {
+  const refinancing = clients
+    .filter((c) => c.refinancing_flag)
+    .sort((a, b) => a.refinancing_window_days - b.refinancing_window_days)
+  const mismatched = clients.filter((c) => c.import_mismatch_flag)
+
+  return (
+    <>
+      <h2 className="view-heading">Proactive Flags</h2>
+      <p className="view-subtitle">
+        Clients that need outreach this week - sorted by urgency, not alphabetically.
+      </p>
+
+      <h3 className="section-heading">Refinancing Opportunities</h3>
+      <div className="panel">
+        {refinancing.length === 0 ? (
+          <p className="state-message">No refinancing windows currently flagged.</p>
+        ) : (
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Entity Name</th>
+                <th>Sector</th>
+                <th>Status</th>
+                <th className="numeric">Est. Total Wallet</th>
+              </tr>
+            </thead>
+            <tbody>
+              {refinancing.map((client) => (
+                <tr key={client.entity_id} onClick={() => onSelectClient(client.entity_id)}>
+                  <td className="entity-name">{client.entity_name}</td>
+                  <td className="sector">{client.sector}</td>
+                  <td>
+                    <FlagBadge
+                      active
+                      variant="warning"
+                      activeLabel={`Window: ${client.refinancing_window_days} days`}
+                    />
+                  </td>
+                  <td
+                    className="numeric"
+                    title={formatZarFull(client.estimated_total_wallet_zar)}
+                  >
+                    {formatZarAbbreviated(client.estimated_total_wallet_zar)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <h3 className="section-heading">Import / Trade Finance Gaps</h3>
+      <div className="panel">
+        {mismatched.length === 0 ? (
+          <p className="state-message">No import mismatches currently flagged.</p>
+        ) : (
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Entity Name</th>
+                <th>Sector</th>
+                <th>Status</th>
+                <th className="numeric">Wallet Gap</th>
+              </tr>
+            </thead>
+            <tbody>
+              {mismatched.map((client) => (
+                <tr key={client.entity_id} onClick={() => onSelectClient(client.entity_id)}>
+                  <td className="entity-name">{client.entity_name}</td>
+                  <td className="sector">{client.sector}</td>
+                  <td>
+                    <FlagBadge active variant="serious" activeLabel="Mismatch detected" />
+                  </td>
+                  <td className="numeric" title={formatZarFull(client.wallet_gap_zar)}>
+                    {formatZarAbbreviated(client.wallet_gap_zar)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </>
+  )
+}
+
 function ClientDetail({ entityId, onBack }) {
   const [client, setClient] = useState(null)
   const [error, setError] = useState(null)
@@ -298,7 +392,7 @@ function App() {
   const [clients, setClients] = useState([])
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [view, setView] = useState('table') // 'table' | 'heatmap' | 'detail'
+  const [view, setView] = useState('table') // 'table' | 'heatmap' | 'flags' | 'detail'
   const [selectedEntityId, setSelectedEntityId] = useState(null)
   const [previousView, setPreviousView] = useState('table')
 
@@ -325,10 +419,20 @@ function App() {
     setView(nextView)
   }
 
+  const flaggedCount = clients.length
+    ? new Set(
+        clients
+          .filter((c) => c.refinancing_flag || c.import_mismatch_flag)
+          .map((c) => c.entity_id),
+      ).size
+    : null
+
   return (
     <div className="app-shell">
       <Header clientCount={clients.length || null} />
-      {view !== 'detail' && <Nav view={view} onNavigate={handleNavigate} />}
+      {view !== 'detail' && (
+        <Nav view={view} onNavigate={handleNavigate} flaggedCount={flaggedCount} />
+      )}
 
       <div className="view-container">
         {loading && <p className="state-message">Loading clients...</p>}
@@ -342,6 +446,10 @@ function App() {
 
             {view === 'heatmap' && (
               <OpportunityHeatmap clients={clients} onSelectClient={handleSelectClient} />
+            )}
+
+            {view === 'flags' && (
+              <ProactiveFlags clients={clients} onSelectClient={handleSelectClient} />
             )}
 
             {view === 'detail' && (
