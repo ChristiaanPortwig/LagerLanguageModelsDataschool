@@ -5,6 +5,7 @@ from ..config.gemini_structured_schemas import (CompanyLevelExtDataResponse, SEN
 import base64
 from pathlib import Path
 import logging
+import json
 
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:
@@ -17,7 +18,8 @@ if not LOGGER.handlers:
 LOGGER.setLevel(logging.INFO)
 LOGGER.propagate = False
 
-load_dotenv()
+ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(ENV_PATH)
 
 class Gemini_Client:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -39,19 +41,17 @@ class Gemini_Client:
 
         return interaction.output_text
 
-    def call_gemini_structured(self, schema_class, prompt, pdfs_dir: str | None, 
-                               model = "gemini-3.5-flash-lite",
-                               response_format_type = "text", 
-                               response_format_mime_type = "application/json"):
+    def call_gemini_structured_json(self, schema_class, prompt, pdfs_dir: str | None, 
+                               model = "gemini-3.5-flash-lite"):
         """
-        Makes a call to gemini, expecting structured output, defaults to json
+        Makes a call to gemini, expecting structured json output
         Params:
             schema_class: Class defining the output schema
             pdfs_dir: The directory in which pdfs are to load into chat, if left none, no pdfs
             will be uploaded
 
         Return:
-            Structured output in defined format
+            Output as json objects
         """
 
         #Find pdfs
@@ -85,14 +85,14 @@ class Gemini_Client:
             model=model,
             input=model_input,
             response_format={
-                "type" : response_format_type,
-                "mime_type" : response_format_mime_type,
+                "type" : "text",
+                "mime_type" : "application/json",
                 "schema" : schema_class.model_json_schema()
             },
         )
 
         response = schema_class.model_validate_json(interaction.output_text)
-        return response
+        return json.loads(response.model_dump_json())
 
 
 if __name__ == "__main__":
