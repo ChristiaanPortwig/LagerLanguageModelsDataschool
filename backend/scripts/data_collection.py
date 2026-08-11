@@ -1,12 +1,28 @@
 from pathlib import Path
 from urllib.parse import parse_qs, urldefrag, urljoin, urlparse
 from datetime import datetime
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 import html
 import json
 import logging
 import re
 import requests
+import signal
+import sys
+import threading
 from bs4 import BeautifulSoup
+
+if __package__ is None:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from backend.scripts.gemini_client import Gemini_Client
+from backend.config.gemini_structured_schemas import (
+    DocumentFilenameValidationResponse,
+)
+from backend.config.prompts import DOCUMENT_FILENAME_VALIDATION_PROMPT
 
 LOGGER = logging.getLogger(__name__)
 if not LOGGER.handlers:
@@ -18,6 +34,51 @@ if not LOGGER.handlers:
     LOGGER.addHandler(handler)
 LOGGER.setLevel(logging.INFO)
 LOGGER.propagate = False
+
+
+class RequestDeadlineExceeded(requests.Timeout):
+    """Raised when an HTTP request exceeds its wall-clock deadline."""
+
+
+@contextmanager
+def request_deadline(seconds, url):
+    """Enforce a real deadline around requests on Unix's main thread.
+
+    ``requests`` timeouts cover connecting and gaps between received bytes;
+    they do not guarantee that the entire call returns within that period.
+    SIGALRM also interrupts DNS resolution and trickle-fed responses. In
+    worker threads or on platforms without ``setitimer``, requests' own
+    connect/read timeout remains the fallback.
+    """
+    can_alarm = (
+        threading.current_thread() is threading.main_thread()
+        and hasattr(signal, "SIGALRM")
+        and hasattr(signal, "setitimer")
+    )
+    if not can_alarm:
+        yield
+        return
+
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    if previous_timer[0] > 0:
+        # Do not interfere with a deadline owned by a notebook or caller.
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def deadline_reached(_signum, _frame):
+        raise RequestDeadlineExceeded(
+            f"Requesting {url} exceeded the {seconds}s deadline"
+        )
+
+    signal.signal(signal.SIGALRM, deadline_reached)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 JSE_SENS_URL = (
     "https://clientportal.jse.co.za/communication/sens-announcements"
@@ -137,16 +198,20 @@ class DataCollector:
     def __get(self, url, timeout):
         LOGGER.info("Requesting %s (timeout=%ss)", url, timeout)
         try:
-            return requests.get(url, headers=self.HEADERS, timeout=timeout)
-        except requests.exceptions.ReadTimeout:
+            with request_deadline(timeout, url):
+                return requests.get(
+                    url,
+                    headers=self.HEADERS,
+                    timeout=(min(5, timeout), timeout),
+                )
+        except requests.Timeout as error:
             LOGGER.warning(
-                "Timed out reading %s; retrying with a %ss timeout",
+                "Request timed out after %ss; skipping %s (%s)",
+                timeout,
                 url,
-                timeout * 2,
+                error,
             )
-            return requests.get(
-                url, headers=self.HEADERS, timeout=timeout * 2
-            )
+            raise
         except requests.exceptions.SSLError:
             if urlparse(url).hostname not in {"goldfields.com", "www.goldfields.com"}:
                 raise
@@ -155,19 +220,35 @@ class DataCollector:
                 "TLS verification failed for %s; retrying without verification",
                 url,
             )
-            return requests.get(
-                url, headers=self.HEADERS, timeout=timeout, verify=False
-            )
+            with request_deadline(timeout, url):
+                return requests.get(
+                    url,
+                    headers=self.HEADERS,
+                    timeout=(min(5, timeout), timeout),
+                    verify=False,
+                )
 
-    #TODO: Later, add fallback to ai scraping. Dashboard should have way to manually upload files
-    # too!!
     def scrape_and_save_reports(self, save_location = Path(__file__).resolve().parents[2] / 'data' / 'downloads'):
+        """Save reports and return document issues requiring attention.
+
+        A complete set contains every type in ``KEYWORDS``, including an
+        interim result, from the current or previous calendar year. Gemini
+        supplies the incorrect-file flags; missing document types are detected
+        directly from scraper results and never inferred by Gemini.
+        """
+        document_issues = []
+        missing_by_company = {}
         for company, urls in self.INVESTOR_URLS.items():
             LOGGER.info("Scraping %s", company)
             try:
-                self._scrape_investor_documents(company, urls, save_location)
+                missing_types = self._scrape_investor_documents(
+                    company, urls, save_location
+                )
+                if missing_types:
+                    missing_by_company[company] = set(missing_types)
             except Exception as e:
                 LOGGER.exception("Couldn't scrape %s: %s", company, e)
+                missing_by_company[company] = set(self.KEYWORDS)
             try:
                 self.get_sens_data(company, save_location)
             except Exception as error:
@@ -175,12 +256,126 @@ class DataCollector:
                     "Couldn't get SENS data for %s: %s", company, error
                 )
 
+        for company, missing_types in missing_by_company.items():
+            company_folder = (
+                Path(save_location) / self.__clean_filename(company)
+            ).resolve()
+            for document_type in sorted(missing_types):
+                document_issues.append({
+                    "location": str(company_folder),
+                    "document_name": document_type,
+                    "is_explicitly_incorrect": False,
+                    "possibly_incorrect": False,
+                    "missing_data": True,
+                    "reason": f"No recent {document_type} document was found.",
+                })
+
+        if missing_by_company:
+            LOGGER.warning(
+                "Companies with incomplete report sets: %s",
+                ", ".join(missing_by_company),
+            )
+        document_issues.extend(
+            self.__validate_downloaded_filenames(save_location)
+        )
+        return sorted(
+            document_issues,
+            key=lambda item: (item["location"], item["document_name"]),
+        )
+
+    def __validate_downloaded_filenames(self, save_location):
+        """Return questionable non-SENS file records without deleting files.
+
+        A generic or inconclusive filename is not evidence that a document is
+        wrong. Validator failures and missing decisions are therefore logged
+        for visibility but do not flag a document.
+        """
+        base_dir = Path(save_location)
+        inputs = []
+        paths_by_key = {}
+        company_names_by_folder = {
+            self.__clean_filename(company): company
+            for company in self.INVESTOR_URLS
+        }
+
+        for company_folder in base_dir.iterdir() if base_dir.exists() else []:
+            if not company_folder.is_dir():
+                continue
+            company = company_names_by_folder.get(
+                company_folder.name, company_folder.name.replace("_", " ")
+            )
+            for path in sorted(company_folder.glob("*.pdf")):
+                item = {"company": company, "filename": path.name}
+                inputs.append(item)
+                paths_by_key[(company, path.name)] = path
+
+        if not inputs:
+            return []
+
+        prompt = DOCUMENT_FILENAME_VALIDATION_PROMPT.format(
+            current_year=datetime.now().year,
+            previous_year=datetime.now().year - 1,
+            documents_json=json.dumps(inputs, ensure_ascii=False, indent=2),
+        )
+        try:
+            response = Gemini_Client().call_gemini_structured_json(
+                DocumentFilenameValidationResponse,
+                prompt,
+                pdfs_dir=None,
+            )
+        except Exception as error:
+            LOGGER.exception("Gemini filename validation failed: %s", error)
+            return []
+
+        reviewed_keys = set()
+        flagged_documents = []
+        for decision in response.get("documents", []):
+            key = (decision.get("company"), decision.get("filename"))
+            path = paths_by_key.get(key)
+            if path is None or key in reviewed_keys:
+                LOGGER.warning("Gemini returned an unknown or duplicate file: %s", key)
+                continue
+            reviewed_keys.add(key)
+            is_explicit = decision.get("is_explicitly_incorrect") is True
+            is_possible = decision.get("possibly_incorrect") is True
+            if is_explicit or is_possible:
+                flagged_documents.append({
+                    "location": str(path.parent.resolve()),
+                    "document_name": path.name,
+                    "is_explicitly_incorrect": is_explicit,
+                    "possibly_incorrect": is_possible,
+                    "missing_data": False,
+                    "reason": decision.get("reason", "no reason supplied"),
+                })
+                flag_type = "explicitly" if is_explicit else "possibly"
+                LOGGER.warning(
+                    "%s: flagged %s incorrect report %s (%s); "
+                    "file was retained",
+                    key[0],
+                    flag_type,
+                    key[1],
+                    decision.get("reason", "no reason supplied"),
+                )
+
+        missing_reviews = set(paths_by_key) - reviewed_keys
+        for company, filename in sorted(missing_reviews):
+            LOGGER.warning(
+                "%s: Gemini did not review %s; file was retained and was not "
+                "flagged",
+                company,
+                filename,
+            )
+        return sorted(
+            flagged_documents,
+            key=lambda item: (item["location"], item["document_name"]),
+        )
+
     def get_sens_data(
             self,
             company_name=None,
             base_dir=Path(__file__).resolve().parents[2] / "data" / "downloads",
     ):
-        """Scrape current and previous calendar-year SENS PDFs from JSE."""
+        """Incrementally scrape SENS PDFs from the last saved record to now."""
         if company_name is None:
             return [
                 self.get_sens_data(company, base_dir)
@@ -197,8 +392,25 @@ class DataCollector:
             LOGGER.warning("%s: could not find a matching JSE issuer", company_name)
             return []
 
+        records_path = sens_folder / "announcements.json"
+        saved_records = self.__load_sens_records(records_path, company_name)
+
         current_year = datetime.now().year
-        start_date = f"{current_year - 1}-01-01"
+        saved_timestamps = [
+            self.__sens_timestamp(record.get("AcknowledgeDateTime", ""))
+            for record in saved_records
+        ]
+        saved_timestamps = [timestamp for timestamp in saved_timestamps if timestamp]
+        if saved_timestamps:
+            # Query the last saved day inclusively. The JSE endpoint accepts
+            # dates rather than an announcement cursor, and inclusion avoids
+            # missing another announcement published later on the same day.
+            last_saved_date = datetime.fromtimestamp(
+                max(saved_timestamps)
+            ).date()
+            start_date = min(last_saved_date, datetime.now().date()).isoformat()
+        else:
+            start_date = f"{current_year - 1}-01-01"
         end_date = datetime.now().date().isoformat()
         LOGGER.info(
             "%s: scraping JSE SENS announcements for %s to %s",
@@ -206,7 +418,7 @@ class DataCollector:
             start_date,
             end_date,
         )
-        records = []
+        new_records = []
         for issuer_id in issuer_ids:
             payload = {
                 "from": f"{start_date}T00:00:00.000Z",
@@ -218,8 +430,11 @@ class DataCollector:
                 payload,
             )
             data = response.json()
-            records.extend(data.get("GetSensAnnouncementForDatesResult") or [])
+            new_records.extend(
+                data.get("GetSensAnnouncementForDatesResult") or []
+            )
 
+        records = saved_records + new_records
         records = list({
             record.get("AnnouncementId")
             or record.get("AnnouncementReferenceNumber")
@@ -233,7 +448,7 @@ class DataCollector:
             reverse=True,
         )
 
-        (sens_folder / "announcements.json").write_text(
+        records_path.write_text(
             json.dumps(records, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -275,6 +490,29 @@ class DataCollector:
             sens_folder,
         )
         return records
+
+    def __load_sens_records(self, records_path, company_name):
+        """Load previously saved SENS metadata, falling back to a full window."""
+        if not records_path.exists():
+            return []
+        try:
+            records = json.loads(records_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            LOGGER.warning(
+                "%s: could not read saved SENS metadata; using the default "
+                "date window: %s",
+                company_name,
+                error,
+            )
+            return []
+        if not isinstance(records, list):
+            LOGGER.warning(
+                "%s: saved SENS metadata is not a list; using the default "
+                "date window",
+                company_name,
+            )
+            return []
+        return [record for record in records if isinstance(record, dict)]
 
     def __post_jse(self, path, payload=None):
         headers = dict(self.HEADERS)
@@ -394,6 +632,9 @@ class DataCollector:
             combined = f"{text} {href}".lower()
 
             for document_type, keywords in self.KEYWORDS.items():
+                if (document_type == "interim_results"
+                        and "presentation" in combined):
+                    continue
                 score = self.__score_document(combined, keywords)
 
                 if score > 0:
@@ -464,6 +705,53 @@ class DataCollector:
                 for frame in soup.find_all("iframe", src=True)
             )
 
+        # Valterra and similar WordPress templates render report records as
+        # JavaScript objects. Pair each file with its own title; using a fixed
+        # slice around the URL can pick up the shared image's upload year and
+        # mislabel old Anglo American Platinum reports as current reports.
+        structured_pdf_urls = set()
+        javascript_title = re.compile(
+            r'''(?is)["']title["']\s*:\s*(?:'''
+            r'''"(?P<double>(?:\\.|[^"\\])*)"|'''
+            r''''(?P<single>(?:\\.|[^'\\])*)')'''
+        )
+        javascript_file_link = re.compile(
+            r'''(?is)["']file_link["']\s*:\s*(?:'''
+            r'''"(?P<double>(?:\\.|[^"\\])*)"|'''
+            r''''(?P<single>(?:\\.|[^'\\])*)')'''
+        )
+        if not is_json:
+            # Scan each title-delimited section once. The previous expression
+            # searched from every `title` to a later `file_link`, causing
+            # catastrophic backtracking on pages such as Glencore's, which
+            # contain many title fields but no file_link records.
+            title_records = list(javascript_title.finditer(res.text))
+            for index, record in enumerate(title_records):
+                section_end = (
+                    title_records[index + 1].start()
+                    if index + 1 < len(title_records)
+                    else len(res.text)
+                )
+                file_link = javascript_file_link.search(
+                    res.text, record.end(), section_end
+                )
+                if file_link is None:
+                    continue
+                raw_title = record.group("double") or record.group("single")
+                raw_href = (
+                    file_link.group("double") or file_link.group("single")
+                )
+                title = BeautifulSoup(
+                    html.unescape(raw_title), "html.parser"
+                ).get_text(" ", strip=True)
+                href = urljoin(
+                    res.url, html.unescape(raw_href).replace(r"\/", "/")
+                )
+                if ".pdf" not in urlparse(href).path.lower():
+                    continue
+                structured_pdf_urls.add(href)
+                add_matches(href, title)
+
         # WordPress/AEM pages often put file links in JSON or component data
         # rather than in an anchor element.
         embedded_pdf = re.compile(
@@ -479,6 +767,8 @@ class DataCollector:
                     else res.url
                 )
                 href = urljoin(base_url, raw_href)
+                if href in structured_pdf_urls:
+                    continue
                 start = max(0, found.start() - 150)
                 context = BeautifulSoup(
                     res.text[start:found.end() + 50], "html.parser"
@@ -524,8 +814,8 @@ class DataCollector:
                         continue
 
         def sort_key(match):
-            years = re.findall(r"\b(?:19|20)\d{2}\b", match["link_text"] + match["url"])
-            return max(map(int, years), default=0), match["score"]
+            years = self.__document_years(match)
+            return max(years, default=0), match["score"]
 
         unique = { (match["type"], match["url"]): match for match in matches }
         documents = sorted(unique.values(), key=sort_key, reverse=True)
@@ -585,6 +875,124 @@ class DataCollector:
 
         return score
 
+    def __document_years(self, document):
+        title_years = {
+            int(year) for year in re.findall(
+                r"(?<!\d)(?:19|20)\d{2}(?!\d)",
+                document.get("link_text", ""),
+            )
+        }
+        if title_years:
+            return title_years
+
+        # WordPress upload folders describe when a file was migrated/uploaded,
+        # not its reporting period (for example /uploads/2026/05/iar-2021.pdf).
+        url = re.sub(
+            r"/uploads/(?:19|20)\d{2}/\d{2}/", "/uploads/", document["url"]
+        )
+        return {
+            int(year) for year in re.findall(
+                r"(?<!\d)(?:19|20)\d{2}(?!\d)", url
+            )
+        }
+
+    def __recent_saved_types(self, company_folder):
+        """Return report types whose filenames prove that they are recent."""
+        accepted_years = {datetime.now().year, datetime.now().year - 1}
+        recent_types = set()
+        for path in company_folder.glob("*.pdf"):
+            parts = path.name.split("__", 2)
+            if len(parts) != 3:
+                continue
+            document_type, labelled_year, original_name = parts
+            try:
+                labelled_year = int(labelled_year)
+            except ValueError:
+                continue
+            source_years = {
+                int(year)
+                for year in re.findall(
+                    r"(?<!\d)(?:19|20)\d{2}(?!\d)", original_name
+                )
+            }
+            # A conflicting source year exposes files previously mislabeled
+            # from a WordPress upload-directory year. Do not let those files
+            # block discovery of the real recent report.
+            if source_years and labelled_year not in source_years:
+                continue
+            if (document_type in self.KEYWORDS
+                    and labelled_year in accepted_years):
+                recent_types.add(document_type)
+        return recent_types
+
+    def __crawl4ai_documents(self, urls, wanted_types):
+        """Use a rendered browser crawl to discover otherwise hidden PDFs."""
+        if not urls or not wanted_types:
+            return []
+
+        async def crawl():
+            browser_config = BrowserConfig(headless=True, verbose=False)
+            run_config = CrawlerRunConfig(
+                cache_mode=CacheMode.BYPASS,
+                page_timeout=60000,
+                scan_full_page=True,
+            )
+            documents = []
+            queued = list(dict.fromkeys(urls))
+            visited = set()
+            async with AsyncWebCrawler(config=browser_config) as crawler:
+                while queued and len(visited) < 20:
+                    page_url = queued.pop(0)
+                    if page_url in visited:
+                        continue
+                    visited.add(page_url)
+                    result = await crawler.arun(url=page_url, config=run_config)
+                    if not result.success:
+                        LOGGER.warning(
+                            "Crawl4AI could not render %s: %s",
+                            page_url,
+                            getattr(result, "error_message", "unknown error"),
+                        )
+                        continue
+
+                    page_links = []
+                    for group in (getattr(result, "links", {}) or {}).values():
+                        if isinstance(group, list):
+                            page_links.extend(group)
+                    for link in page_links:
+                        if not isinstance(link, dict):
+                            continue
+                        href = urljoin(page_url, link.get("href", ""))
+                        text = " ".join(filter(None, (
+                            link.get("text", ""), link.get("title", "")
+                        )))
+                        combined = f"{text} {href}".lower()
+                        if ".pdf" in combined or "/download/" in urlparse(href).path:
+                            for document_type in wanted_types:
+                                score = self.__score_document(
+                                    combined, self.KEYWORDS[document_type]
+                                )
+                                if score:
+                                    documents.append({
+                                        "type": document_type,
+                                        "url": href,
+                                        "link_text": text,
+                                        "score": score,
+                                    })
+                        elif (urlparse(href).hostname == urlparse(page_url).hostname
+                              and self.__score_document(
+                                  combined,
+                                  sum((self.KEYWORDS[k] for k in wanted_types), []),
+                              ) > 0):
+                            queued.append(urldefrag(href).url)
+            return documents
+
+        # This method is also called from notebooks, where an asyncio loop is
+        # already running. A dedicated thread keeps the synchronous public API
+        # safe in both scripts and notebooks.
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(lambda: asyncio.run(crawl())).result()
+
     def _scrape_investor_documents(self, company_name: str, investor_urls,
                                    base_dir = Path(__file__).resolve().parents[2]/"data"/"downloads"):
         """
@@ -600,21 +1008,22 @@ class DataCollector:
             investor_urls = [investor_urls]
 
         def sort_key(document):
-            years = re.findall(
-                r"\b(?:19|20)\d{2}\b",
-                document["link_text"] + " " + document["url"],
-            )
-            return max(map(int, years), default=0), document["score"]
+            years = self.__document_years(document)
+            return max(years, default=0), document["score"]
 
-        downloaded_types = set()
+        downloaded_types = self.__recent_saved_types(company_folder)
+        # Always rediscover interim results: a valid prior-year file must not
+        # prevent a newer interim release from replacing it.
+        downloaded_types.discard("interim_results")
         accepted_years = {datetime.now().year, datetime.now().year - 1}
-        all_docs = []
+        responsive_urls = set()
 
         def discover(urls):
             discovered = []
             for investor_url in urls:
                 try:
                     discovered.extend(self.__find_relevant_documents(investor_url))
+                    responsive_urls.add(investor_url)
                 except requests.RequestException as error:
                     LOGGER.warning(
                         "%s: could not scrape source %s: %s",
@@ -641,19 +1050,13 @@ class DataCollector:
                 if doc["type"] in downloaded_types:
                     continue
 
-                document_years = {
-                    int(year)
-                    for year in re.findall(
-                        r"\b(?:19|20)\d{2}\b",
-                        doc["link_text"] + " " + doc["url"],
-                    )
-                }
-                if document_years and not document_years.intersection(accepted_years):
+                document_years = self.__document_years(doc)
+                if not document_years.intersection(accepted_years):
                     LOGGER.info(
-                        "%s: skipping stale %s candidate from %s",
+                        "%s: skipping stale or undated %s candidate%s",
                         company_name,
                         doc["type"],
-                        max(document_years),
+                        f" from {max(document_years)}" if document_years else "",
                     )
                     continue
 
@@ -661,7 +1064,11 @@ class DataCollector:
                 if not original_name.lower().endswith(".pdf"):
                     original_name = f"{doc['type']}.pdf"
 
-                filename = f"{doc['type']}__{self.__clean_filename(original_name)}"
+                report_year = max(document_years & accepted_years)
+                filename = (
+                    f"{doc['type']}__{report_year}__"
+                    f"{self.__clean_filename(original_name)}"
+                )
                 output_path = company_folder / filename
 
                 try:
@@ -698,7 +1105,6 @@ class DataCollector:
         ]
 
         primary_docs = discover(primary_urls)
-        all_docs.extend(primary_docs)
         download_candidates(primary_docs)
 
         if set(self.KEYWORDS) - downloaded_types and fallback_urls:
@@ -707,8 +1113,33 @@ class DataCollector:
                 company_name,
             )
             fallback_docs = discover(fallback_urls)
-            all_docs.extend(fallback_docs)
             download_candidates(fallback_docs)
+
+        missing_types = set(self.KEYWORDS) - downloaded_types
+        if missing_types:
+            if responsive_urls:
+                LOGGER.info(
+                    "%s: standard discovery incomplete; trying Crawl4AI for: %s",
+                    company_name,
+                    ", ".join(sorted(missing_types)),
+                )
+                crawl4ai_docs = self.__crawl4ai_documents(
+                    sorted(responsive_urls), missing_types
+                )
+                download_candidates(sorted(
+                    {
+                        (document["type"], document["url"]): document
+                        for document in crawl4ai_docs
+                    }.values(),
+                    key=sort_key,
+                    reverse=True,
+                ))
+            else:
+                LOGGER.warning(
+                    "%s: all investor sources were unreachable; skipping "
+                    "rendered-browser fallback",
+                    company_name,
+                )
 
         missing_types = set(self.KEYWORDS) - downloaded_types
         if missing_types:
@@ -720,9 +1151,9 @@ class DataCollector:
         else:
             LOGGER.info("%s: finished successfully", company_name)
 
-        return all_docs
+        return missing_types
 
 if __name__ == "__main__":
     my_collector = DataCollector()
     LOGGER.setLevel(logging.INFO)
-    my_collector.scrape_and_save_reports()
+    print(my_collector.scrape_and_save_reports())
