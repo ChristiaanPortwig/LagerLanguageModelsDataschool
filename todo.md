@@ -11,4 +11,5 @@
 - Who to meet section in dashboard - Who should the banker make contact with??
 - SENS data needs to be downloaded daily
 - POPI
-
+- When gemini analyzes something, it should add a flag to reanalize if something was off.
+- Bizzcommunity

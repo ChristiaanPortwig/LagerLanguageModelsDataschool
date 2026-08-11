@@ -338,6 +338,14 @@ class _CompanyLevelExtData(BaseModel):
         description="Major shareholders or material ownership interests explicitly identified."
     )
 
+    extra_notes: Optional[str] = Field(
+        default=None,
+        description=(
+            "Concise, evidence-based notes from the supplied documents that are not captured "
+            "by another field and may help Syn Bank target the company."
+        )
+    )
+
 class _SENSEvent(BaseModel):
     """
     This forms part of what is sent to gemini, since we'll need a list of these
@@ -446,6 +454,14 @@ class _SENSEvent(BaseModel):
         description="Short explanation of why the event may create a banking opportunity."
     )
 
+    extra_notes: Optional[str] = Field(
+        default=None,
+        description=(
+            "Concise, evidence-based notes from the supplied announcement that are not captured "
+            "by another field and may help Syn Bank target the company."
+        )
+    )
+
 
 class CompanyLevelExtDataResponse(BaseModel):
     """
@@ -464,4 +480,41 @@ class SENSEventsResponse(BaseModel):
     events: List[_SENSEvent] = Field(
         default_factory=list,
         description="Material SENS events extracted from all supplied SENS announcements."
+    )
+
+
+class DocumentFilenameValidation(BaseModel):
+    """Gemini's assessment of one downloaded non-SENS document."""
+
+    company: str = Field(
+        description="Company name exactly as supplied in the validation input."
+    )
+    filename: str = Field(
+        description="Filename exactly as supplied in the validation input."
+    )
+    is_explicitly_incorrect: bool = Field(
+        description=(
+            "True only when the filename itself contains explicit evidence "
+            "that the document is incorrect; false for valid, generic, "
+            "ambiguous, or inconclusive filenames."
+        )
+    )
+    possibly_incorrect: bool = Field(
+        description=(
+            "True only when the filename contains specific suspicious evidence "
+            "but not enough to establish an explicit error. Must be false for "
+            "generic filenames and when is_explicitly_incorrect is true."
+        )
+    )
+    reason: str = Field(
+        description="Concise reason for the validation decision."
+    )
+
+
+class DocumentFilenameValidationResponse(BaseModel):
+    """Structured response for validating downloaded report filenames."""
+
+    documents: List[DocumentFilenameValidation] = Field(
+        default_factory=list,
+        description="Exactly one validation result for every supplied document."
     )
