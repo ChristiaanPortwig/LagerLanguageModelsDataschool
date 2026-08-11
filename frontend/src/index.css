@@ -108,35 +108,10 @@ button {
   white-space: nowrap;
 }
 
-.app-nav {
-  display: flex;
-  gap: 4px;
-  padding: 0 32px;
+.prompt-bar-placeholder {
+  height: 60px;
   background: var(--surface-1);
   border-bottom: 1px solid var(--border-hairline);
-}
-
-.nav-tab {
-  appearance: none;
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  padding: 12px 4px;
-  margin: 0 12px 0 0;
-  color: var(--text-secondary);
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.nav-tab:hover {
-  color: var(--text-primary);
-}
-
-.nav-tab.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-  font-weight: 600;
 }
 
 .view-container {
@@ -156,6 +131,56 @@ button {
 }
 
 /* ---------------------------------------------------------------------
+   Dashboard grid
+   Summary spans the top; table and heatmap sit side by side below it;
+   flags spans the bottom. Collapses to a single column on narrow
+   viewports.
+------------------------------------------------------------------------ */
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  grid-template-areas:
+    'summary summary'
+    'table   heatmap'
+    'flags   flags';
+  gap: 20px;
+}
+
+.grid-panel {
+  /* Prevent wide table/chart content from forcing the grid track wider
+     than intended; .table-scroll/.chart-card handle overflow instead. */
+  min-width: 0;
+}
+
+.panel-summary {
+  grid-area: summary;
+}
+
+.panel-table {
+  grid-area: table;
+}
+
+.panel-heatmap {
+  grid-area: heatmap;
+}
+
+.panel-flags {
+  grid-area: flags;
+}
+
+@media (max-width: 900px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      'summary'
+      'table'
+      'heatmap'
+      'flags';
+  }
+}
+
+/* ---------------------------------------------------------------------
    Panels / cards
 ------------------------------------------------------------------------ */
 
@@ -165,9 +190,17 @@ button {
   border-radius: var(--radius);
 }
 
+.kpi-panel {
+  padding: 20px 24px;
+}
+
 /* ---------------------------------------------------------------------
    Data table
 ------------------------------------------------------------------------ */
+
+.table-scroll {
+  overflow-x: auto;
+}
 
 .data-table {
   width: 100%;
@@ -179,6 +212,12 @@ button {
   padding: 10px 16px;
   text-align: left;
   white-space: nowrap;
+}
+
+.data-table-compact th,
+.data-table-compact td {
+  padding: 7px 10px;
+  font-size: 12px;
 }
 
 .data-table thead th {
@@ -313,6 +352,13 @@ button {
   margin-top: 0;
 }
 
+.section-heading-count {
+  text-transform: none;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--text-muted);
+}
+
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -384,6 +430,10 @@ button {
 
 .chart-card {
   padding: 24px 24px 12px;
+}
+
+.chart-card-compact {
+  padding: 16px 16px 8px;
 }
 
 .chart-tooltip {

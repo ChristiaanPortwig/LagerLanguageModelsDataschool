@@ -61,6 +61,45 @@ Pillar breakdown (% of Syn Bank's observed activity with this client):
 {mismatch_line}
 """
 
+def build_assistant_prompt(question: str, all_clients: list[dict], focused_entity_id: str | None = None) -> str:
+    """
+    Builds the prompt for the global assistant. Includes a compact summary of every 
+    client (for portfolio-wide questions) and, if the banker currently has a client 
+    open on screen, that client's full record for extra context.
+    """
+    portfolio_lines = "\n".join(
+        f"- {c['entity_name']} ({c['entity_id']}, {c['sector']}): "
+        f"wallet R{c['estimated_total_wallet_zar']:,.0f}, "
+        f"Syn Bank share {c['syn_bank_share_pct']:.1f}%, "
+        f"gap R{c['wallet_gap_zar']:,.0f}, "
+        f"opportunity score {c['opportunity_score']:.1f}, "
+        f"refinancing={'yes, ' + str(c['refinancing_window_days']) + 'd' if c.get('refinancing_flag') else 'no'}, "
+        f"import mismatch={'yes' if c.get('import_mismatch_flag') else 'no'}"
+        for c in all_clients
+    )
+
+    focus_block = ""
+    if focused_entity_id:
+        focused = next((c for c in all_clients if c["entity_id"] == focused_entity_id), None)
+        if focused:
+            focus_block = (
+                f"\n\nThe banker currently has {focused['entity_name']} ({focused['entity_id']}) "
+                f"open on screen. If the question is ambiguous about which client it refers to, "
+                f"assume they mean this one."
+            )
+
+    return f"""A banker at Syn Bank is using a dashboard covering these 20 corporate clients:
+
+{portfolio_lines}
+{focus_block}
+
+Answer this question using only the data above. If the answer isn't determinable from 
+this data, say so plainly rather than guessing. Keep the answer conversational and 
+concise — a few sentences, not a report.
+
+Question: {question}
+"""
+
 
 if __name__ == "__main__":
     # Quick manual test — paste the printed output into Google AI Studio
