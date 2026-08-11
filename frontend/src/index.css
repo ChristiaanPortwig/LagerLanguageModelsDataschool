@@ -132,19 +132,51 @@ button {
 
 /* ---------------------------------------------------------------------
    Dashboard grid
-   Summary spans the top; table and heatmap sit side by side below it;
-   flags spans the bottom. Collapses to a single column on narrow
-   viewports.
+   Summary always spans the top, fixed. Below it, table/heatmap/flags
+   default to table+heatmap side by side with flags spanning underneath.
+   Focusing one of the three (via a --focus-<key> modifier class) swaps
+   the areas so that panel spans the full width in a tall row, while the
+   other two collapse into a thin strip row. Panel identity keeps the
+   same grid-area token in every state, so only the areas/row-sizing
+   change — no panel ever changes which DOM slot it occupies.
 ------------------------------------------------------------------------ */
 
 .dashboard-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  grid-template-rows: auto auto auto;
   grid-template-areas:
     'summary summary'
     'table   heatmap'
     'flags   flags';
   gap: 20px;
+  transition:
+    grid-template-columns 0.35s ease,
+    grid-template-rows 0.35s ease;
+}
+
+.dashboard-grid--focus-table {
+  grid-template-rows: auto minmax(60vh, auto) auto;
+  grid-template-areas:
+    'summary summary'
+    'table   table'
+    'heatmap flags';
+}
+
+.dashboard-grid--focus-heatmap {
+  grid-template-rows: auto minmax(60vh, auto) auto;
+  grid-template-areas:
+    'summary summary'
+    'heatmap heatmap'
+    'table   flags';
+}
+
+.dashboard-grid--focus-flags {
+  grid-template-rows: auto minmax(60vh, auto) auto;
+  grid-template-areas:
+    'summary summary'
+    'flags   flags'
+    'table   heatmap';
 }
 
 .grid-panel {
@@ -169,9 +201,119 @@ button {
   grid-area: flags;
 }
 
+/* Default-state tiles and strips are clickable to focus/switch panels. */
+.panel-clickable {
+  cursor: pointer;
+  border-radius: var(--radius);
+  transition: box-shadow 0.2s ease;
+}
+
+.panel-clickable:hover .panel {
+  border-color: var(--accent);
+}
+
+.panel-focused {
+  position: relative;
+  animation: panel-pop-in 0.3s ease;
+}
+
+.panel-collapse-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  appearance: none;
+  background: var(--surface-1);
+  border: 1px solid var(--border-hairline);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  z-index: 1;
+}
+
+.panel-collapse-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Collapsed strip: title + one key stat, click to bring this panel into focus. */
+.panel-strip {
+  width: 100%;
+  appearance: none;
+  background: var(--surface-1);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius);
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  color: var(--text-primary);
+  animation: panel-fade-in 0.3s ease;
+}
+
+.panel-strip:hover {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+}
+
+.panel-strip-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.panel-strip-stat {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+@keyframes panel-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes panel-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dashboard-grid,
+  .dashboard-grid--focus-table,
+  .dashboard-grid--focus-heatmap,
+  .dashboard-grid--focus-flags,
+  .panel-focused,
+  .panel-strip {
+    transition: none;
+    animation: none;
+  }
+}
+
 @media (max-width: 900px) {
-  .dashboard-grid {
+  .dashboard-grid,
+  .dashboard-grid--focus-table,
+  .dashboard-grid--focus-heatmap,
+  .dashboard-grid--focus-flags {
     grid-template-columns: 1fr;
+    grid-template-rows: auto;
     grid-template-areas:
       'summary'
       'table'

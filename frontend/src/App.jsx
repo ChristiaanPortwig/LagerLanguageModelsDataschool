@@ -443,12 +443,73 @@ function ClientDetail({ entityId, onBack }) {
   )
 }
 
+/**
+ * Wraps one of the three interactive dashboard panels (table/heatmap/flags)
+ * and handles its three possible states, keeping the same grid slot in every
+ * state so only the panel's own content/size changes, not its DOM position:
+ *
+ *   - default: no panel is focused. Renders the normal (compact) tile;
+ *     clicking anywhere on it focuses this panel.
+ *   - focused: this panel is the one in focus. Renders full content plus a
+ *     "Collapse" control to return to the default grid.
+ *   - strip: a different panel is focused. Renders a thin clickable strip
+ *     (title + one stat) that switches focus to this panel instead.
+ */
+function DashboardPanel({
+  panelKey,
+  focusedPanel,
+  onFocus,
+  onCollapse,
+  stripTitle,
+  stripStat,
+  children,
+}) {
+  const isFocused = focusedPanel === panelKey
+  const isStrip = focusedPanel !== null && !isFocused
+
+  if (isStrip) {
+    return (
+      <section className={`grid-panel panel-${panelKey} panel-strip-wrap`}>
+        <button type="button" className="panel-strip" onClick={() => onFocus(panelKey)}>
+          <span className="panel-strip-title">{stripTitle}</span>
+          {stripStat && <span className="panel-strip-stat">{stripStat}</span>}
+        </button>
+      </section>
+    )
+  }
+
+  return (
+    <section
+      className={`grid-panel panel-${panelKey} ${isFocused ? 'panel-focused' : 'panel-clickable'}`}
+      onClick={!isFocused ? () => onFocus(panelKey) : undefined}
+    >
+      {isFocused && (
+        <button
+          type="button"
+          className="panel-collapse-btn"
+          onClick={(event) => {
+            event.stopPropagation()
+            onCollapse()
+          }}
+        >
+          Collapse ✕
+        </button>
+      )}
+      {children}
+    </section>
+  )
+}
+
 function App() {
   const [clients, setClients] = useState([])
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(true)
   const [view, setView] = useState('grid') // 'grid' | 'detail'
   const [selectedEntityId, setSelectedEntityId] = useState(null)
+  // Which of table/heatmap/flags is expanded, or null for the default grid.
+  // Kept separate from `view` so opening a client's detail page and coming
+  // back restores whichever panel was focused, instead of resetting it.
+  const [focusedPanel, setFocusedPanel] = useState(null)
 
   useEffect(() => {
     fetch(API_BASE)
@@ -468,6 +529,11 @@ function App() {
     setView('detail')
   }
 
+  const handleCollapsePanel = () => setFocusedPanel(null)
+
+  const refinancingCount = clients.filter((c) => c.refinancing_flag).length
+  const mismatchCount = clients.filter((c) => c.import_mismatch_flag).length
+
   return (
     <div className="app-shell">
       {/* Reserved for the global prompt bar (added in a later step). */}
@@ -482,26 +548,67 @@ function App() {
         {!loading && !error && (
           <>
             {view === 'grid' && (
-              <div className="dashboard-grid">
+              <div
+                className={`dashboard-grid ${
+                  focusedPanel ? `dashboard-grid--focus-${focusedPanel}` : ''
+                }`}
+              >
                 <section className="grid-panel panel-summary">
                   <PortfolioSummary clients={clients} />
                 </section>
 
-                <section className="grid-panel panel-table">
-                  <ClientTable clients={clients} onSelectClient={handleSelectClient} compact />
-                </section>
+                <DashboardPanel
+                  panelKey="table"
+                  focusedPanel={focusedPanel}
+                  onFocus={setFocusedPanel}
+                  onCollapse={handleCollapsePanel}
+                  stripTitle="Clients"
+                  stripStat={`${clients.length} total`}
+                >
+                  <ClientTable
+                    clients={clients}
+                    onSelectClient={
+                      focusedPanel === 'table' ? handleSelectClient : () => setFocusedPanel('table')
+                    }
+                    compact={focusedPanel !== 'table'}
+                  />
+                </DashboardPanel>
 
-                <section className="grid-panel panel-heatmap">
+                <DashboardPanel
+                  panelKey="heatmap"
+                  focusedPanel={focusedPanel}
+                  onFocus={setFocusedPanel}
+                  onCollapse={handleCollapsePanel}
+                  stripTitle="Opportunity Heatmap"
+                  stripStat={`${refinancingCount} refinancing signals`}
+                >
                   <OpportunityHeatmap
                     clients={clients}
-                    onSelectClient={handleSelectClient}
-                    compact
+                    onSelectClient={
+                      focusedPanel === 'heatmap'
+                        ? handleSelectClient
+                        : () => setFocusedPanel('heatmap')
+                    }
+                    compact={focusedPanel !== 'heatmap'}
                   />
-                </section>
+                </DashboardPanel>
 
-                <section className="grid-panel panel-flags">
-                  <ProactiveFlags clients={clients} onSelectClient={handleSelectClient} compact />
-                </section>
+                <DashboardPanel
+                  panelKey="flags"
+                  focusedPanel={focusedPanel}
+                  onFocus={setFocusedPanel}
+                  onCollapse={handleCollapsePanel}
+                  stripTitle="Proactive Flags"
+                  stripStat={`${refinancingCount + mismatchCount} flags`}
+                >
+                  <ProactiveFlags
+                    clients={clients}
+                    onSelectClient={
+                      focusedPanel === 'flags' ? handleSelectClient : () => setFocusedPanel('flags')
+                    }
+                    compact={focusedPanel !== 'flags'}
+                  />
+                </DashboardPanel>
               </div>
             )}
 
