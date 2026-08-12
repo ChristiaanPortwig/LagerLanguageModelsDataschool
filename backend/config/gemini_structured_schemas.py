@@ -3,14 +3,35 @@ This script includes classes to be imported when using gemini structured schemas
 https://ai.google.dev/gemini-api/docs/structured-output
 """
 
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
-from typing import Optional, List, Literal
 
 
+JSECompanyName = Literal[
+    "OUTsurance Group",
+    "Bid Corporation",
+    "MTN Group",
+    "Aspen Pharmacare",
+    "NEPI Rockcastle",
+    "Pepkor Holdings",
+    "Naspers",
+    "The Bidvest Group",
+    "Sanlam",
+    "Gold Fields",
+    "Clicks Group",
+    "Anglo American",
+    "AngloGold Ashanti",
+    "BHP Group",
+    "Shoprite Holdings",
+    "Valterra Platinum",
+    "Vodacom Group",
+    "Shaftesbury Capital plc",
+    "Glencore",
+    "Prosus",
+]
 
+ReportingUnit = Literal["units", "thousands", "millions", "billions"]
 
 class _CompanyLevelExtData(BaseModel):
     """
@@ -22,23 +43,27 @@ class _CompanyLevelExtData(BaseModel):
     """
 
     # Metadata
-    company: str = Field(
-        description="Name of the company."
+    company: JSECompanyName = Field(
+        description="Canonical JSE issuer name from the allowed values."
     )
 
     report_date: Optional[str] = Field(
         default=None,
-        description="Reporting period end date stated in the document."
+        description="Reporting period end date in ISO 8601 YYYY-MM-DD format."
     )
 
     reporting_currency: Optional[str] = Field(
         default=None,
-        description="Currency in which the financial values are reported, e.g. ZAR, USD, EUR."
+        description=(
+            "ISO 4217 uppercase currency code applying to monetary fields, "
+            "for example ZAR, USD or EUR."
+        )
     )
 
-    reporting_unit: Optional[str] = Field(
+    reporting_unit: Optional[ReportingUnit] = Field(
         default=None,
-        description="Reporting scale used in the document, e.g. units, thousands, millions."
+        description="Decimal scale applying to monetary fields in this record. E.g. thousands, millions, billions"
+        ""
     )
 
     source_document: Optional[str] = Field(
@@ -142,7 +167,10 @@ class _CompanyLevelExtData(BaseModel):
 
     currencies_exposed_to: List[str] = Field(
         default_factory=list,
-        description="Material currencies to which the company is explicitly exposed, e.g. USD, EUR, GBP."
+        description=(
+            "Sorted, unique ISO 4217 uppercase codes for material currencies "
+            "to which the company is explicitly exposed."
+        )
     )
 
     foreign_currency_assets: Optional[float] = Field(
@@ -236,7 +264,10 @@ class _CompanyLevelExtData(BaseModel):
 
     countries_of_operation: List[str] = Field(
         default_factory=list,
-        description="Countries in which the company explicitly states that it operates."
+        description=(
+            "Sorted, unique ISO 3166-1 alpha-2 country codes for countries in "
+            "which the company explicitly states that it operates."
+        )
     )
 
     foreign_subsidiaries: List[str] = Field(
@@ -354,13 +385,16 @@ class _SENSEvent(BaseModel):
     a corporate banking opportunity.
     """
 
-    company: str = Field(
-        description="Company to which the SENS announcement relates."
+    company: JSECompanyName = Field(
+        description="Canonical JSE issuer name to which the announcement relates."
     )
 
     announcement_date: Optional[str] = Field(
         default=None,
-        description="Date on which the SENS announcement was published."
+        description=(
+            "Date on which the SENS announcement was published, in ISO 8601 "
+            "YYYY-MM-DD format."
+        )
     )
 
     title: Optional[str] = Field(
@@ -403,9 +437,17 @@ class _SENSEvent(BaseModel):
         description="Explicit monetary value of the transaction, project, facility or event."
     )
 
+    event_unit: Optional[ReportingUnit] = Field(
+        default=None,
+        description="Decimal scale applying to event_value. Null when event_value is null."
+    )
+
     currency: Optional[str] = Field(
         default=None,
-        description="Currency associated with event_value."
+        description=(
+            "ISO 4217 uppercase currency code associated with event_value. "
+            "Null when event_value is null."
+        )
     )
 
     counterparty: Optional[str] = Field(
@@ -420,12 +462,18 @@ class _SENSEvent(BaseModel):
 
     country: Optional[str] = Field(
         default=None,
-        description="Country materially associated with the event."
+        description=(
+            "ISO 3166-1 alpha-2 code for the country materially associated "
+            "with the event."
+        )
     )
 
     expected_completion_date: Optional[str] = Field(
         default=None,
-        description="Expected completion or implementation date explicitly stated in the announcement."
+        description=(
+            "Expected completion or implementation date in ISO 8601 "
+            "YYYY-MM-DD format."
+        )
     )
 
     banking_opportunities: List[

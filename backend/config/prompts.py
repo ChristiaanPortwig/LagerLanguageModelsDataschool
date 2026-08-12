@@ -3,7 +3,11 @@ Prompts for LLMs
 """
 
 COMPANY_LEVEL_PROMPT = """
-You are extracting structured company-level financial and operational data from multiple documents for ONE company.
+You are extracting structured company-level financial and operational data from one document for ONE company.
+
+The company is `{company}`. Always return that exact canonical JSE issuer name
+in the `company` field. Never copy a longer legal name or an abbreviation from
+the document.
 
 The supplied documents may include:
 - annual reports
@@ -21,7 +25,21 @@ Rules:
 - Do not estimate, infer, or fabricate missing values.
 - If a scalar field is not disclosed, return null.
 - If a list field has no disclosed values, return an empty list.
-- Preserve the reporting currency and reporting unit exactly as stated.
+- Return every value that can be represented numerically as a JSON number. Do
+  not include currency symbols, thousands separators, percent signs or unit
+  text in numeric fields.
+- Keep monetary values at the scale printed in the source and set
+  `reporting_unit` to exactly one of `units`, `thousands`, `millions` or
+  `billions`. Normalize equivalent labels such as Rm, $m and mn to `millions`,
+  and labels such as R'000 and £000 to `thousands`.
+- Return `reporting_currency` and every item in `currencies_exposed_to` as an
+  uppercase ISO 4217 three-letter code. For example, rand is ZAR, US dollars
+  are USD and pounds sterling are GBP.
+- Return `countries_of_operation` as sorted, unique ISO 3166-1 alpha-2 codes.
+  For example, South Africa is ZA, the United Kingdom is GB and the United
+  States is US.
+- Return all dates in ISO 8601 `YYYY-MM-DD` format.
+- Use percentage points for percentage fields and days for duration fields.
 - Do not scale or convert monetary values.
 - Prefer the most detailed and authoritative source where documents overlap.
 - Do not duplicate a reporting period because the same information appears in an annual report, financial statements, and presentation.
@@ -45,6 +63,10 @@ Return only the structured output required by the schema.
 SENS_PROMPT = """
 You are analysing multiple SENS announcements for ONE company.
 
+The company is `{company}`. Always return that exact canonical JSE issuer name
+in the `company` field. Never copy a longer legal name or an abbreviation from
+an announcement.
+
 The response schema contains a list called `events`.
 
 Create ONE event record per distinct material corporate event.
@@ -58,8 +80,17 @@ Rules:
 - Do not create duplicate events when multiple announcements refer to the same underlying transaction or event. Use the most recent or most complete information where appropriate.
 - Choose the event_type that best represents the underlying event.
 - Use `other` only if none of the defined event types reasonably apply.
-- event_value must only contain an explicitly disclosed monetary value.
-- currency must correspond to event_value.
+- Return every value that can be represented numerically as a JSON number. Do
+  not include currency symbols, thousands separators or unit text in numeric
+  fields.
+- `event_value` must only contain an explicitly disclosed monetary value at the
+  scale printed in the source. Set `event_unit` to exactly one of `units`,
+  `thousands`, `millions` or `billions`; normalize equivalent source labels.
+- `currency` must correspond to `event_value` and must be an uppercase ISO 4217
+  three-letter code. For example, rand is ZAR, US dollars are USD and pounds
+  sterling are GBP.
+- Return `country` as an ISO 3166-1 alpha-2 code, for example ZA, GB or US.
+- Return all dates in ISO 8601 `YYYY-MM-DD` format.
 - counterparty must only be populated when explicitly identified.
 - expected_completion_date must only be populated when explicitly stated.
 - banking_opportunities may contain multiple products, but include only products directly and reasonably connected to the disclosed event.

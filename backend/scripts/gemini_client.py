@@ -41,14 +41,14 @@ class Gemini_Client:
 
         return interaction.output_text
 
-    def call_gemini_structured_json(self, schema_class, prompt, pdfs_dir: str | None, 
+    def call_gemini_structured_json(self, schema_class, prompt, pdfs_dir: str | None,
                                model = "gemini-3.5-flash-lite"):
         """
         Makes a call to gemini, expecting structured json output
         Params:
             schema_class: Class defining the output schema
-            pdfs_dir: The directory in which pdfs are to load into chat, if left none, no pdfs
-            will be uploaded
+            pdfs_dir: A PDF file or directory of PDFs to load into the chat. If
+            left as None, no PDFs will be uploaded.
 
         Return:
             Output as json objects
@@ -57,8 +57,12 @@ class Gemini_Client:
         #Find pdfs
         model_input = []
         if pdfs_dir:
-            directory = Path(pdfs_dir)
-            pdf_paths = list(directory.glob("*.pdf"))
+            pdf_source = Path(pdfs_dir)
+            pdf_paths = (
+                [pdf_source]
+                if pdf_source.is_file() and pdf_source.suffix.lower() == ".pdf"
+                else list(pdf_source.glob("*.pdf"))
+            )
             pdfs_bytes = []
 
             LOGGER.info(f"Pdf paths: {pdf_paths}")
@@ -84,6 +88,7 @@ class Gemini_Client:
         interaction = self.client.interactions.create(
             model=model,
             input=model_input,
+            generation_config={"seed": 0},
             response_format={
                 "type" : "text",
                 "mime_type" : "application/json",
