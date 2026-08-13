@@ -607,3 +607,51 @@ button {
   color: var(--text-secondary);
   font-size: 14px;
 }
+
+.state-message-inline {
+  padding: 16px 0 0;
+}
+
+.state-message-error {
+  color: var(--status-critical);
+}
+
+/* ---------------------------------------------------------------------
+   Briefing report
+------------------------------------------------------------------------ */
+
+.btn-primary {
+  appearance: none;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 9px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #ffffff;
+  cursor: pointer;
+  transition:
+    background 0.2s ease,
+    opacity 0.2s ease;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 85%, black);
+}
+
+.btn-primary:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.report-text {
+  margin: 16px 0 0;
+  padding: 16px 18px;
+  background: var(--accent-wash);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}

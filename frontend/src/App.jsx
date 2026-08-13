@@ -341,6 +341,50 @@ function ProactiveFlags({ clients, onSelectClient, compact = false }) {
   )
 }
 
+function BriefingReport({ entityId }) {
+  const [report, setReport] = useState(null)
+  const [error, setError] = useState(null)
+  const [loading, setLoading] = useState(false)
+
+  const handleGenerate = () => {
+    setLoading(true)
+    setError(null)
+    setReport(null)
+    fetch(`${API_BASE}/${entityId}/briefing`, { method: 'POST' })
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`Request failed with status ${res.status}`)
+        }
+        return res.json()
+      })
+      .then((data) => setReport(data.report))
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false))
+  }
+
+  return (
+    <section className="panel detail-section">
+      <h2>Briefing Report</h2>
+      <button
+        type="button"
+        className="btn-primary"
+        onClick={handleGenerate}
+        disabled={loading}
+      >
+        {loading ? 'Generating…' : 'Generate Report'}
+      </button>
+
+      {loading && <p className="state-message state-message-inline">Generating report...</p>}
+      {error && (
+        <p className="state-message state-message-inline state-message-error">
+          Failed to generate report: {error}
+        </p>
+      )}
+      {report && !loading && !error && <p className="report-text">{report}</p>}
+    </section>
+  )
+}
+
 function ClientDetail({ entityId, onBack }) {
   const [client, setClient] = useState(null)
   const [error, setError] = useState(null)
@@ -439,6 +483,8 @@ function ClientDetail({ entityId, onBack }) {
           </div>
         </div>
       </section>
+
+      <BriefingReport key={client.entity_id} entityId={client.entity_id} />
     </>
   )
 }
