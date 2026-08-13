@@ -1,5 +1,5 @@
 """
-backend/prompts.py
+backend/prompts_briefing.py
 
 Builds the prompt sent to Gemini for generating a client briefing note.
 Used by backend/app.py once Gemini module is wired in.
