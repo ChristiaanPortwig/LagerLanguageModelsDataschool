@@ -27,6 +27,9 @@ dashboard_json = final_client_table.to_dict(orient='records')
 """
 
 import pandas as pd
+import json
+from pathlib import Path
+
 
 def find_cross_ledger_overlaps(
     cross_border_df: pd.DataFrame, 
@@ -203,19 +206,104 @@ def build_client_wallet_baseline(
 
     return client_table.sort_values('syn_bank_observed_total_zar', ascending=False)
 
+def convert_client_table_to_dashboard_schema(client_table: pd.DataFrame) -> list:
+    """
+    Transforms the raw aggregated client DataFrame into the exact JSON schema 
+    required by the frontend dashboard.
+    
+    Args:
+        client_table: DataFrame containing columns like entity_id, entity_name, sector, 
+                      txn_banking_total_zar, cross_border_total_zar, trade_finance_total_zar, 
+                      lending_signal_total_zar, and syn_bank_observed_total_zar.
+                      
+    Returns:
+        list of dicts: Clean records matching the dashboard frontend schema.
+    """
+    formatted_records = []
+    
+    for _, row in client_table.iterrows():
+        observed_total = float(row['syn_bank_observed_total_zar'])
+        
+        if observed_total > 0:
+            txn_pct = round((row['txn_banking_total_zar'] / observed_total) * 100, 2)
+            cb_pct = round((row['cross_border_total_zar'] / observed_total) * 100, 2)
+            tf_pct = round((row['trade_finance_total_zar'] / observed_total) * 100, 2)
+            ib_pct = round((row['lending_signal_total_zar'] / observed_total) * 100, 2)
+        else:
+            txn_pct = cb_pct = tf_pct = ib_pct = 0.0
+
+        # (If you have an external total addressable wallet column, swap it in here)
+        estimated_total_wallet = 1 #TODO: get from christiaan
+        syn_bank_share = round((observed_total / estimated_total_wallet) * 100, 2) if estimated_total_wallet > 0 else 0.0
+        wallet_gap = max(0.0, estimated_total_wallet - observed_total)
+        
+        record = {
+            "entity_id": str(row['entity_id']),
+            "entity_name": str(row['entity_name']),
+            "sector": str(row['sector']),
+            "txn_banking_pct": txn_pct,
+            "cross_border_pct": cb_pct,
+            "trade_finance_pct": tf_pct,
+            "lending_ib_pct": ib_pct,
+            "estimated_total_wallet_zar": float(estimated_total_wallet),
+            "syn_bank_share_pct": syn_bank_share,
+            "wallet_gap_zar": float(wallet_gap),
+            
+            # TODO: figure out these
+            "refinancing_flag": False,
+            "refinancing_window_days": None,
+            "import_mismatch_flag": bool(row['lending_signal_txn_count'] > 5), # Example logical flag based on data
+            "opportunity_score": round((wallet_gap / 1_000_000_000) * 1.5, 2) # Scaled mock opportunity score
+        }
+        
+        formatted_records.append(record)
+        
+    return formatted_records
+
+def save_dashboard_clients_to_json(client_records, output_path="../../data/client_data.json"):
+    """
+    Takes the formatted list of client dictionaries and saves them as a pretty-printed 
+    JSON file to the specified target path.
+    """
+    # Resolve the file path relative to the current script's location
+    target_file = Path(__file__).resolve().parent / output_path
+
+    with open(target_file, "w", encoding="utf-8") as f:
+        json.dump(client_records, f, indent=2, ensure_ascii=False)
+        
+    print(f"Successfully saved {len(client_records)} client records to {target_file.resolve()}")
+
+def reload_client_data():
+    cross_border_payments = pd.read_csv("../../data/cross_border_payments.csv")
+    trade_finance = pd.read_csv("../../data/trade_finance.csv")
+    transactional_banking = pd.read_csv("../../data/transactional_banking.csv")
+    print("[data-agg] Loaded csv")
+    # Currency casing fix (found during EDA: 'ZAR' vs 'zar')
+    transactional_banking['currency'] = transactional_banking['currency'].str.upper()
+    overlap_df = find_cross_ledger_overlaps(amount_tolerance_pct=2, 
+                                            cross_border_df=cross_border_payments, 
+                                            transactional_df=transactional_banking, 
+                                            day_tolerance=3)
+    
+    print("[data-agg] Overlap found")
+    final_client_table = build_client_wallet_baseline(
+        transactional_df=transactional_banking,
+        cross_border_df=cross_border_payments,
+        trade_finance_df=trade_finance,
+        overlap_df=overlap_df
+    )
+    print("[data-agg] final client table")
+    
+    formatted = convert_client_table_to_dashboard_schema(final_client_table)
+    print("[data-agg] formatted")
+    save_dashboard_clients_to_json(formatted)
+    print("[data-agg] saved to data folder")
+
 # ==========================================
 # Example usage in a backend route/service:
 # ==========================================
 if __name__ == "__main__":
-    # overlap_df = find_cross_ledger_overlaps(...) # from the previous function
-    
-    # final_client_table = build_client_wallet_baseline(
-    #     transactional_df=transactional_banking,
-    #     cross_border_df=cross_border_payments,
-    #     trade_finance_df=trade_finance,
-    #     overlap_df=overlap_df
-    # )
-    
-    # Convert to dictionary/JSON to send to frontend dashboard
-    # dashboard_json = final_client_table.to_dict(orient='records')
-    pass
+    import pandas as pd
+    pd.options.display.float_format = '{:,.2f}'.format
+
+    reload_client_data()

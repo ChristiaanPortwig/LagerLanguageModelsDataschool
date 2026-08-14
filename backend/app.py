@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse
 
 from prompts_briefing import build_briefing_prompt
 
-DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "mock_clients.json"
+DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "client_data.json"
 
 # Global variable to hold clients in memory while the server is running
 _CLIENTS_CACHE = []
@@ -125,3 +125,5 @@ def create_client_briefing(client_id: str):
     # return its response instead of echoing the prompt back.
     prompt = build_briefing_prompt(client)
     return {"report": prompt}
+
+# TODO: hard regen of client.json by calling data_agg
