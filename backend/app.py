@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.requests import Request
 from fastapi.responses import JSONResponse
 
+from scripts.gemini_client import Gemini_Client
 from prompts_briefing import build_briefing_prompt
 
 DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "client_data.json"
@@ -124,6 +125,10 @@ def create_client_briefing(client_id: str):
     # Gemini call is ready, this will send the built prompt to the model and
     # return its response instead of echoing the prompt back.
     prompt = build_briefing_prompt(client)
-    return {"report": prompt}
+
+    client = Gemini_Client()
+    output = client.call_gemini_ustructured(prompt=prompt)
+    print(f"Gemini request made\nOutput:\n{output}")
+    return {"report": output}
 
 # TODO: hard regen of client.json by calling data_agg

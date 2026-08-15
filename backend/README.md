@@ -64,6 +64,18 @@ All dataframe-returning methods use `(external_df, sens_df)` order.
 | `standardize_data(external_df, sens_df, fx_as_of_date=None)` | Converts monetary values to base-unit ZAR and adds FX audit columns. |
 | `standardize_external_data(...)` | Compatibility alias for `standardize_data`. |
 
+### Client scoring
+
+Import this module-level function from
+`backend.scripts.calculate_client_score`:
+
+| Function | Purpose |
+|--------|---------|
+| `calculate_client_score(final_client_table, decayed_sens, wallet_size, gap_weight=0.50, sens_weight=0.40, relationship_weight=0.10)` | Calculates transactional-banking, global-markets, and investment-banking client scores, then returns their wallet-gap-weighted total score. The result also includes the wallet, gap, SENS, relationship, and normalized component values used in each pillar calculation. Scores are on a 0–1 scale and the weights must sum to 1. |
+
+`calculate_client_scores(...)` is available as a plural-name compatibility
+wrapper with the same parameters and return value.
+
 ### `Gemini_Client`
 
 | Method | Purpose |
