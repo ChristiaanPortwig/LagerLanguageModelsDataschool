@@ -22,9 +22,11 @@ processor = Data_Processor()
 external_df, sens_df = processor.process_data()
 ```
 
-`process_data` extracts the PDFs, validates available company values with
-yfinance, expands thousands/millions/billions to base units, and converts dated
-monetary values to ZAR. Standardized rows retain the source ISO currency in
+`process_data` extracts base-unit values from PDFs, validates available company
+values with yfinance, and converts dated monetary values to ZAR. Gemini is
+instructed to return numeric values in scientific notation and to expand source
+scales such as thousands/millions/billions during extraction. Standardized rows
+retain the source ISO currency in
 `original_currency` alongside `fx_rate_to_zar` and `fx_rate_date`. To
 standardize existing frames without extracting PDFs, use
 `processor.standardize_data(external_df, sens_df)`. Pass

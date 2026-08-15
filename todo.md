@@ -14,3 +14,5 @@
 - When gemini analyzes something, it should add a flag to reanalize if something was off.
 - Bizzcommunity
 - Pdf at 258 tokens per page
+- Fill in missing data
+- Users should be able to change assumptions

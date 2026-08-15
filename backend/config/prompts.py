@@ -9,7 +9,7 @@ The company is `{company}`. Always return that exact canonical JSE issuer name
 in the `company` field. Never copy a longer legal name or an abbreviation from
 the document.
 
-The supplied documents may include:
+The supplied document may be one of the following:
 - annual reports
 - annual financial statements
 - interim results
@@ -17,21 +17,32 @@ The supplied documents may include:
 
 The response schema contains a list called `records`.
 
-Create ONE record per distinct reporting period, not one record per document.
-Merge information from multiple documents that refer to the same reporting period.
+Create ONE record per distinct FULL-YEAR reporting period disclosed in this
+document. Set `reporting_period_type` to `annual` for every returned record.
+
+Do not return a record for a half-year, interim, quarterly, year-to-date, or
+other partial period. A document whose primary subject is interim or half-year
+results should normally return an empty `records` list. It may only yield a
+record if it separately presents an explicitly labelled, complete full-year
+period; use only the values belonging to that full-year period.
 
 Rules:
 - Extract only information explicitly stated in the supplied documents.
 - Do not estimate, infer, or fabricate missing values.
+- Never annualise a partial-period value. Never add H1 and H2, quarters,
+  year-to-date amounts, or values from separate documents to manufacture an
+  annual value.
+- Never put a half-year or interim value into a full-year record, even when it
+  is the newest value in the document.
 - If a scalar field is not disclosed, return null.
 - If a list field has no disclosed values, return an empty list.
-- Return every value that can be represented numerically as a JSON number. Do
-  not include currency symbols, thousands separators, percent signs or unit
-  text in numeric fields.
-- Keep monetary values at the scale printed in the source and set
-  `reporting_unit` to exactly one of `units`, `thousands`, `millions` or
-  `billions`. Normalize equivalent labels such as Rm, $m and mn to `millions`,
-  and labels such as R'000 and £000 to `thousands`.
+- Return every value that can be represented numerically as a JSON number in
+  scientific notation. For example, return 2.5e9 rather than 2,500 million,
+  and 3.65e1 rather than 36.5. Do not include currency symbols, thousands
+  separators, percent signs or unit text in numeric fields.
+- Expand every monetary value to base units, regardless of the scale printed
+  in the source. For example, R2.5 million must be returned as 2.5e6 and
+  USD 3 billion as 3.0e9. Always set `reporting_unit` to `units`.
 - Return `reporting_currency` and every item in `currencies_exposed_to` as an
   uppercase ISO 4217 three-letter code. For example, rand is ZAR, US dollars
   are USD and pounds sterling are GBP.
@@ -40,10 +51,12 @@ Rules:
   States is US.
 - Return all dates in ISO 8601 `YYYY-MM-DD` format.
 - Use percentage points for percentage fields and days for duration fields.
-- Do not scale or convert monetary values.
+- Do not convert currencies. Only expand the source scale to base units.
 - Prefer the most detailed and authoritative source where documents overlap.
 - Do not duplicate a reporting period because the same information appears in an annual report, financial statements, and presentation.
-- Use current-period values, not comparative prior-period values, unless the field specifically relates to future maturities or commitments.
+- Within the selected full-year period, use values for that period rather than
+  interim values or comparatives for another fiscal year. A prior-year annual
+  comparative may be returned as its own annual record when it is explicit.
 - Do not confuse total receivables/payables with trade receivables/payables.
 - Do not infer imports, exports, foreign revenue, currencies, guarantees, derivatives, or exposures from general business descriptions.
 - Only include countries, currencies, commodities, subsidiaries, customers, suppliers, lenders, or shareholders explicitly identified.
@@ -56,6 +69,51 @@ Rules:
 - `report_date` should be the reporting period end date.
 
 The objective is accurate extraction for later share-of-wallet analysis.
+
+Return only the structured output required by the schema.
+"""
+
+
+COMPANY_LEVEL_COMBINATION_PROMPT = """
+You are reconciling candidate rows extracted independently from financial
+documents for ONE company into the final company-level dataframe.
+
+The company is `{company}`. Always return that exact canonical JSE issuer name
+in the `company` field.
+
+Candidate rows (JSON):
+{records_json}
+
+Return `record: null` when the candidates do not support a reliable full-year
+annual record. Otherwise return exactly one final record for the most recent
+full fiscal year supported by an annual report, annual financial statements,
+or explicitly annual results.
+
+Reconciliation rules:
+- Decide which candidate value belongs in each field from its reporting period,
+  source document, and meaning. Do not combine rows merely because a field is
+  non-empty or newer.
+- Set `reporting_period_type` to `annual`.
+- Exclude every half-year, interim, quarterly, year-to-date, or other partial-
+  period value. Never annualise, extrapolate, add, or otherwise manufacture a
+  full-year value from partial periods.
+- Keep all period-bound financial, cash-flow, debt, working-capital,
+  expenditure, employee, market, and performance values aligned to the same
+  selected fiscal year and `report_date`.
+- Never fill a missing field using a value from another fiscal year. Missing is
+  better than a plausible but mismatched value.
+- You may combine complementary disclosures only when their sources clearly
+  refer to the same selected annual reporting period.
+- When same-period sources conflict, prefer audited annual financial statements,
+  then the annual report, then explicitly annual results or presentations.
+- Preserve list and descriptive disclosures only when they are supported by an
+  annual source for the selected reporting cycle. Deduplicate list values.
+- Do not convert currencies. Monetary values must remain expanded to base units
+  and `reporting_unit` must be `units`.
+- Use null for undisclosed scalar fields and an empty list for undisclosed list
+  fields. Do not infer or fabricate values.
+- `source_document` should concisely identify the principal annual source or
+  sources used for the final record.
 
 Return only the structured output required by the schema.
 """
@@ -80,12 +138,14 @@ Rules:
 - Do not create duplicate events when multiple announcements refer to the same underlying transaction or event. Use the most recent or most complete information where appropriate.
 - Choose the event_type that best represents the underlying event.
 - Use `other` only if none of the defined event types reasonably apply.
-- Return every value that can be represented numerically as a JSON number. Do
-  not include currency symbols, thousands separators or unit text in numeric
-  fields.
-- `event_value` must only contain an explicitly disclosed monetary value at the
-  scale printed in the source. Set `event_unit` to exactly one of `units`,
-  `thousands`, `millions` or `billions`; normalize equivalent source labels.
+- Return every value that can be represented numerically as a JSON number in
+  scientific notation. For example, return 2.5e9 rather than 2,500 million.
+  Do not include currency symbols, thousands separators or unit text in
+  numeric fields.
+- `event_value` must only contain an explicitly disclosed monetary value,
+  expanded to base units regardless of the scale printed in the source. For
+  example, R2.5 million must be returned as 2.5e6. Set `event_unit` to `units`
+  when `event_value` is present, otherwise set it to null.
 - `currency` must correspond to `event_value` and must be an uppercase ISO 4217
   three-letter code. For example, rand is ZAR, US dollars are USD and pounds
   sterling are GBP.

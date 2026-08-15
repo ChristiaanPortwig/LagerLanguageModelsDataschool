@@ -31,7 +31,8 @@ JSECompanyName = Literal[
     "Prosus",
 ]
 
-ReportingUnit = Literal["units", "thousands", "millions", "billions"]
+ReportingUnit = Literal["units"]
+ReportingPeriodType = Literal["annual", "interim", "quarterly", "other", "unknown"]
 
 class _CompanyLevelExtData(BaseModel):
     """
@@ -52,6 +53,14 @@ class _CompanyLevelExtData(BaseModel):
         description="Reporting period end date in ISO 8601 YYYY-MM-DD format."
     )
 
+    reporting_period_type: ReportingPeriodType = Field(
+        default="unknown",
+        description=(
+            "Whether the values cover a full fiscal year or a partial reporting "
+            "period. Final reconciled company records must be annual."
+        )
+    )
+
     reporting_currency: Optional[str] = Field(
         default=None,
         description=(
@@ -60,10 +69,12 @@ class _CompanyLevelExtData(BaseModel):
         )
     )
 
-    reporting_unit: Optional[ReportingUnit] = Field(
-        default=None,
-        description="Decimal scale applying to monetary fields in this record. E.g. thousands, millions, billions"
-        ""
+    reporting_unit: ReportingUnit = Field(
+        default="units",
+        description=(
+            "Always 'units': every monetary field is expanded to its full "
+            "base-unit value."
+        )
     )
 
     source_document: Optional[str] = Field(
@@ -148,10 +159,35 @@ class _CompanyLevelExtData(BaseModel):
         description="Finance costs or interest expense incurred on borrowings."
     )
 
+    floating_rate_debt: Optional[float] = Field(
+        default=None,
+        description="Debt explicitly disclosed as bearing a floating or variable interest rate."
+    )
+
+    interest_rate_derivative_notional: Optional[float] = Field(
+        default=None,
+        description="Notional value of explicitly disclosed interest-rate derivatives."
+    )
+
+    bank_loan_debt: Optional[float] = Field(
+        default=None,
+        description="Debt explicitly identified as drawn bank loans or bank facilities."
+    )
+
     # Capex
     capital_expenditure: Optional[float] = Field(
         default=None,
         description="Capital expenditure on long-lived assets or projects."
+    )
+
+    project_or_contract_value: Optional[float] = Field(
+        default=None,
+        description="Value of an explicitly disclosed project or major contract."
+    )
+
+    external_debt_raised: Optional[float] = Field(
+        default=None,
+        description="External debt explicitly raised to finance a disclosed project."
     )
 
     # FX / international exposure
@@ -275,6 +311,16 @@ class _CompanyLevelExtData(BaseModel):
         description="Foreign subsidiaries explicitly listed or described in the document."
     )
 
+    imports_value: Optional[float] = Field(
+        default=None,
+        description="Explicit monetary value of imports or international sourcing activity."
+    )
+
+    exports_value: Optional[float] = Field(
+        default=None,
+        description="Explicit monetary value of exports or sales to foreign customers."
+    )
+
     major_customers_suppliers: List[str] = Field(
         default_factory=list,
         description="Major customers, suppliers or counterparties explicitly identified."
@@ -289,6 +335,21 @@ class _CompanyLevelExtData(BaseModel):
     commodity_derivatives: Optional[str] = Field(
         default=None,
         description="Explicitly disclosed commodity futures, options, swaps or other commodity hedges."
+    )
+
+    commodity_linked_revenue: Optional[float] = Field(
+        default=None,
+        description="Revenue explicitly disclosed as linked to commodity production or sales."
+    )
+
+    commodity_exposure_value: Optional[float] = Field(
+        default=None,
+        description="Explicit monetary value of the company's commodity exposure."
+    )
+
+    commodity_derivative_notional: Optional[float] = Field(
+        default=None,
+        description="Notional value of explicitly disclosed commodity derivatives."
     )
 
     interest_rate_exposure: Optional[str] = Field(
@@ -434,12 +495,15 @@ class _SENSEvent(BaseModel):
 
     event_value: Optional[float] = Field(
         default=None,
-        description="Explicit monetary value of the transaction, project, facility or event."
+        description=(
+            "Explicit monetary value of the transaction, project, facility or "
+            "event, expanded to its full base-unit value."
+        )
     )
 
     event_unit: Optional[ReportingUnit] = Field(
         default=None,
-        description="Decimal scale applying to event_value. Null when event_value is null."
+        description="Always 'units' when event_value is present; otherwise null."
     )
 
     currency: Optional[str] = Field(
@@ -518,6 +582,18 @@ class CompanyLevelExtDataResponse(BaseModel):
     records: List[_CompanyLevelExtData] = Field(
         default_factory=list,
         description="Financial data records extracted from all supplied company financial documents."
+    )
+
+
+class CompanyLevelExtDataCombinationResponse(BaseModel):
+    """Gemini's final reconciliation of candidate company-level rows."""
+
+    record: Optional[_CompanyLevelExtData] = Field(
+        default=None,
+        description=(
+            "One reconciled record for the latest supported full fiscal year, "
+            "or null when no reliable annual record is available."
+        ),
     )
 
 

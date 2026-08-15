@@ -5,6 +5,7 @@ import re
 import time
 import unicodedata
 import warnings
+from numbers import Number
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -13,10 +14,15 @@ import yfinance as yf
 from pypdf import PdfWriter
 
 from ..config.gemini_structured_schemas import (
+    CompanyLevelExtDataCombinationResponse,
     CompanyLevelExtDataResponse,
     SENSEventsResponse,
 )
-from ..config.prompts import COMPANY_LEVEL_PROMPT, SENS_PROMPT
+from ..config.prompts import (
+    COMPANY_LEVEL_COMBINATION_PROMPT,
+    COMPANY_LEVEL_PROMPT,
+    SENS_PROMPT,
+)
 from .gemini_client import Gemini_Client
 
 
@@ -237,6 +243,16 @@ EXTERNAL_NUMERIC_FIELDS = {
     "foreign_currency_assets",
     "foreign_currency_liabilities",
     "fx_derivative_notional",
+    "floating_rate_debt",
+    "interest_rate_derivative_notional",
+    "bank_loan_debt",
+    "imports_value",
+    "exports_value",
+    "commodity_linked_revenue",
+    "commodity_exposure_value",
+    "commodity_derivative_notional",
+    "project_or_contract_value",
+    "external_debt_raised",
     "guarantees_outstanding",
     "letters_of_credit_disclosed",
     "contingent_liabilities",
@@ -278,7 +294,11 @@ YFINANCE_STATEMENT_FIELDS = {
     ),
     "cost_of_sales": (
         "income",
-        ("Cost Of Revenue", "Reconciled Cost Of Revenue"),
+        (
+            "Cost Of Revenue",
+            "Reconciled Cost Of Revenue",
+            "Cost Of Sales",
+        ),
         True,
     ),
     "finance_costs": (
@@ -286,7 +306,16 @@ YFINANCE_STATEMENT_FIELDS = {
         ("Interest Expense", "Interest Expense Non Operating"),
         True,
     ),
-    "inventory": ("balance", ("Inventory",), False),
+    "employee_expenses": (
+        ("income", "cash_flow"),
+        ("Salaries And Wages", "Payments On Behalf Of Employees"),
+        True,
+    ),
+    "inventory": (
+        "balance",
+        ("Inventory",),
+        False,
+    ),
     "trade_receivables": (
         "balance",
         ("Accounts Receivable", "Receivables"),
@@ -294,7 +323,11 @@ YFINANCE_STATEMENT_FIELDS = {
     ),
     "trade_payables": (
         "balance",
-        ("Payables", "Accounts Payable"),
+        (
+            "Payables",
+            "Accounts Payable",
+            "Payables And Accrued Expenses",
+        ),
         False,
     ),
     "cash_and_cash_equivalents": (
@@ -302,13 +335,30 @@ YFINANCE_STATEMENT_FIELDS = {
         (
             "Cash Cash Equivalents And Short Term Investments",
             "Cash And Cash Equivalents",
+            "Cash Cash Equivalents And Federal Funds Sold",
+            "Cash Financial",
         ),
         False,
     ),
     "total_debt": ("balance", ("Total Debt",), False),
     "short_term_debt": (
         "balance",
-        ("Current Debt", "Current Debt And Capital Lease Obligation"),
+        (
+            "Current Debt",
+            "Current Debt And Capital Lease Obligation",
+            "Other Current Borrowings",
+            "Current Notes Payable",
+        ),
+        False,
+    ),
+    "debt_due_within_12_months": (
+        "balance",
+        (
+            "Current Debt",
+            "Current Debt And Capital Lease Obligation",
+            "Other Current Borrowings",
+            "Current Notes Payable",
+        ),
         False,
     ),
     "long_term_debt": (
@@ -318,32 +368,64 @@ YFINANCE_STATEMENT_FIELDS = {
     ),
     "operating_cash_flow": (
         "cash_flow",
-        ("Operating Cash Flow", "Total Cash From Operating Activities"),
+        (
+            "Operating Cash Flow",
+            "Cash Flow From Continuing Operating Activities",
+            "Total Cash From Operating Activities",
+        ),
         False,
     ),
     "capital_expenditure": (
         "cash_flow",
-        ("Capital Expenditure",),
+        ("Capital Expenditure", "Capital Expenditure Reported"),
         True,
     ),
+    "foreign_revenue": ("cash_flow", ("Foreign Sales",), False),
     "dividends_paid": (
         "cash_flow",
-        ("Cash Dividends Paid", "Common Stock Dividend Paid"),
+        (
+            "Cash Dividends Paid",
+            "Common Stock Dividend Paid",
+            "Dividend Paid CFO",
+            "Dividends Paid Direct",
+        ),
         True,
     ),
     "tax_paid": (
         "cash_flow",
-        ("Income Tax Paid Supplemental", "Income Tax Paid"),
+        (
+            "Income Tax Paid Supplemental Data",
+            "Income Tax Paid Supplemental",
+            "Income Tax Paid",
+            "Taxes Refund Paid Direct",
+        ),
         True,
     ),
 }
 
 
 YFINANCE_INFO_FIELDS = {
+    # The statement value for these fields is preferred. These info entries are
+    # useful fallbacks for issuers/periods whose Yahoo statements are sparse.
+    "revenue": ("totalRevenue",),
+    "cost_of_sales": ("costOfRevenue",),
+    "cash_and_cash_equivalents": ("totalCash",),
+    "operating_cash_flow": ("operatingCashflow",),
+    "total_debt": ("totalDebt",),
     "market_capitalisation": ("marketCap",),
     "share_price": ("currentPrice", "regularMarketPrice"),
+    "share_return": ("52WeekChange",),
     "enterprise_value": ("enterpriseValue",),
     "employee_count": ("fullTimeEmployees",),
+    "assets_under_management": ("assetsUnderManagement",),
+    "ownership_major_shareholders": ("_majorShareholders",),
+}
+
+
+YFINANCE_DERIVED_WORKING_CAPITAL_FIELDS = {
+    "receivable_days": ("trade_receivables", "revenue"),
+    "payable_days": ("trade_payables", "cost_of_sales"),
+    "inventory_days": ("inventory", "cost_of_sales"),
 }
 
 
@@ -420,51 +502,51 @@ class Data_Processor:
         except (TypeError, ValueError):
             return True
 
-    @classmethod
-    def _keep_most_recent_company_fields(cls, records: list[dict]) -> list[dict]:
-        """Merge records per company, preferring recent non-empty fields.
+    def _combine_company_records_with_gemini(
+        self, records: list[dict]
+    ) -> list[dict]:
+        """Ask Gemini to reconcile independently extracted rows by fiscal year."""
+        if not records:
+            return []
 
-        Records with an invalid or missing ``report_date`` are treated as older
-        than records with a valid date. Input order breaks ties, so the result is
-        deterministic when two documents have the same reporting date.
-        """
-        records_by_company = {}
-        company_order = []
+        candidate_df = pd.DataFrame(records)
+        combined_records = []
+        for company, company_df in candidate_df.groupby(
+            "company", sort=True, dropna=False
+        ):
+            if not self._has_value(company):
+                LOGGER.warning("Skipping candidate rows without a company name")
+                continue
 
-        for position, record in enumerate(records):
-            company = str(record.get("company") or "").strip()
-            company_key = company.casefold()
-            if company_key not in records_by_company:
-                records_by_company[company_key] = []
-                company_order.append(company_key)
-
-            report_date = pd.to_datetime(
-                record.get("report_date"), errors="coerce", utc=True
+            canonical_company = self._canonical_company_name(company)
+            records_json = company_df.to_json(
+                orient="records",
+                date_format="iso",
+                force_ascii=False,
             )
-            records_by_company[company_key].append(
-                (pd.isna(report_date), report_date, position, record)
+            response = self._call_gemini_with_retry(
+                CompanyLevelExtDataCombinationResponse,
+                COMPANY_LEVEL_COMBINATION_PROMPT.format(
+                    company=canonical_company,
+                    records_json=records_json,
+                ),
+                None,
             )
+            if response is None or response.get("record") is None:
+                continue
 
-        merged_records = []
-        for company_key in company_order:
-            dated_records = records_by_company[company_key]
-            dated_records.sort(
-                key=lambda item: (
-                    not item[0],
-                    item[1].value if not item[0] else 0,
-                    item[2],
+            record = self._normalise_company_record(
+                response["record"], canonical_company
+            )
+            if record.get("reporting_period_type") != "annual":
+                LOGGER.warning(
+                    "Skipping non-annual reconciled record for %s",
+                    canonical_company,
                 )
-            )
+                continue
+            combined_records.append(record)
 
-            merged = {}
-            for _, _, _, record in dated_records:
-                for field, value in record.items():
-                    if cls._has_value(value):
-                        merged[field] = value
-
-            merged_records.append(merged)
-
-        return merged_records
+        return combined_records
 
     @classmethod
     def _canonical_company_name(cls, company) -> str:
@@ -693,10 +775,15 @@ class Data_Processor:
                     document_path,
                 )
                 if curr_company_lvl_json is not None:
-                    company_records.extend(
-                        self._normalise_company_record(record, canonical_company)
-                        for record in curr_company_lvl_json.get("records", [])
-                    )
+                    for record in curr_company_lvl_json.get("records", []):
+                        normalised_record = self._normalise_company_record(
+                            record, canonical_company
+                        )
+                        # The collector's filename retains the classified report
+                        # type (for example ``interim_results__``), making it more
+                        # reliable reconciliation evidence than a generated title.
+                        normalised_record["source_document"] = document_path.name
+                        company_records.append(normalised_record)
 
             sens_paths = sorted((company_dir / "SENS").glob("*.pdf"))
             if not sens_paths:
@@ -727,8 +814,11 @@ class Data_Processor:
                         for record in curr_sens_json.get("events", [])
                     )
 
+        # Reconciliation is deliberately a separate final batch. Candidate rows
+        # retain their source periods until Gemini decides which same-year annual
+        # disclosures belong in each final company record.
         curr_company_df = pd.DataFrame(
-            self._keep_most_recent_company_fields(company_records)
+            self._combine_company_records_with_gemini(company_records)
         )
         curr_sens_df = pd.DataFrame(sens_records)
 
@@ -837,6 +927,42 @@ class Data_Processor:
             return 1_000.0
         return 1.0
 
+    @classmethod
+    def _require_base_units(
+        cls,
+        dataframe: pd.DataFrame,
+        value_fields,
+        unit_fields,
+        dataframe_name: str,
+    ) -> None:
+        """Reject legacy scaled values now that extraction returns base units."""
+        present_values = set(value_fields).intersection(dataframe.columns)
+        present_units = [
+            field for field in unit_fields if field in dataframe.columns
+        ]
+        if not present_values or not present_units:
+            return
+
+        for row_index, row in dataframe.iterrows():
+            if not any(cls._has_value(row.get(field)) for field in present_values):
+                continue
+            unit = next(
+                (
+                    row.get(field)
+                    for field in present_units
+                    if cls._has_value(row.get(field))
+                ),
+                None,
+            )
+            if unit is None:
+                continue
+            normalized_unit = str(unit).strip().casefold()
+            if normalized_unit not in {"1", "1.0", "unit", "units"}:
+                raise ValueError(
+                    f"{dataframe_name} row {row_index!r} uses {unit!r}; "
+                    "monetary values must already be in base 'units'"
+                )
+
     @staticmethod
     def _statement_value(statement, row_names, report_date):
         if not isinstance(statement, pd.DataFrame) or statement.empty:
@@ -885,6 +1011,20 @@ class Data_Processor:
             return None
 
     @classmethod
+    def _mapped_statement_value(
+        cls, statements, statement_names, row_names, report_date
+    ):
+        if isinstance(statement_names, str):
+            statement_names = (statement_names,)
+        for statement_name in statement_names:
+            value = cls._statement_value(
+                statements.get(statement_name), row_names, report_date
+            )
+            if value is not None:
+                return value
+        return None
+
+    @classmethod
     def _set_yfinance_value(
         cls, dataframe, row_index, field, yfinance_value, company, ticker
     ) -> None:
@@ -893,6 +1033,14 @@ class Data_Processor:
 
         if field not in dataframe.columns:
             dataframe[field] = pd.NA
+        elif (
+            isinstance(yfinance_value, (list, tuple, dict, set))
+            or field in EXTERNAL_NUMERIC_FIELDS
+            and not pd.api.types.is_numeric_dtype(dataframe[field].dtype)
+        ):
+            # Pandas extension string columns reject list-like or numeric
+            # assignments, even when their current value is empty.
+            dataframe[field] = dataframe[field].astype(object)
 
         current_value = dataframe.at[row_index, field]
         values_match = False
@@ -936,6 +1084,43 @@ class Data_Processor:
                 error,
             )
             info = {}
+        if not isinstance(info, dict):
+            info = {}
+
+        # Yahoo normally exposes cost of revenue in statements, but when only
+        # the quote-summary financial data is populated it can still be
+        # reconstructed exactly from total revenue and gross profit.
+        if not Data_Processor._has_value(info.get("costOfRevenue")):
+            total_revenue = Data_Processor._numeric_value(
+                info.get("totalRevenue")
+            )
+            gross_profit = Data_Processor._numeric_value(
+                info.get("grossProfits")
+            )
+            if total_revenue is not None and gross_profit is not None:
+                info["costOfRevenue"] = total_revenue - gross_profit
+
+        # FastInfo is sourced independently from ``info`` and is frequently
+        # available when Yahoo's larger quote-summary response is incomplete.
+        fast_info_fields = {
+            "market_cap": "marketCap",
+            "last_price": "currentPrice",
+            "year_change": "52WeekChange",
+        }
+        try:
+            fast_info = ticker.fast_info
+            for fast_name, info_name in fast_info_fields.items():
+                if Data_Processor._has_value(info.get(info_name)):
+                    continue
+                value = fast_info.get(fast_name)
+                if isinstance(value, Number) and Data_Processor._has_value(value):
+                    info[info_name] = value
+        except Exception as error:
+            LOGGER.warning(
+                "Could not load yfinance fast information for %s: %s",
+                ticker_symbol,
+                error,
+            )
 
         statements = {}
         statement_getters = {
@@ -944,60 +1129,97 @@ class Data_Processor:
             "cash_flow": ticker.get_cash_flow,
         }
         for statement_name, getter in statement_getters.items():
+            available_statements = []
+            for frequency in ("yearly", "quarterly"):
+                try:
+                    statement = getter(freq=frequency)
+                    if isinstance(statement, pd.DataFrame) and not statement.empty:
+                        available_statements.append(statement)
+                except Exception as error:
+                    LOGGER.warning(
+                        "Could not load yfinance %s %s statement for %s: %s",
+                        frequency,
+                        statement_name,
+                        ticker_symbol,
+                        error,
+                    )
+            if available_statements:
+                statement = pd.concat(available_statements, axis=1)
+                statements[statement_name] = statement.loc[
+                    :, ~statement.columns.duplicated()
+                ]
+            else:
+                statements[statement_name] = pd.DataFrame()
+
+        major_shareholders = []
+        for holder_type, getter_name in (
+            ("institutional", "get_institutional_holders"),
+            ("mutual-fund", "get_mutualfund_holders"),
+        ):
             try:
-                statements[statement_name] = getter(freq="yearly")
+                holders = getattr(ticker, getter_name)()
             except Exception as error:
                 LOGGER.warning(
-                    "Could not load yfinance %s statement for %s: %s",
-                    statement_name,
+                    "Could not load yfinance %s holders for %s: %s",
+                    holder_type,
                     ticker_symbol,
                     error,
                 )
-                statements[statement_name] = pd.DataFrame()
+                continue
+            if not isinstance(holders, pd.DataFrame) or holders.empty:
+                continue
+            holder_column = next(
+                (
+                    column
+                    for column in holders.columns
+                    if str(column).strip().casefold()
+                    in {"holder", "organization", "name"}
+                ),
+                None,
+            )
+            if holder_column is not None:
+                major_shareholders.extend(holders[holder_column].tolist())
+        major_shareholders = Data_Processor._sorted_unique(major_shareholders)
+        if major_shareholders:
+            info["_majorShareholders"] = major_shareholders
 
         return info, statements
 
     def validate_external_data(
         self,
+        external_df: pd.DataFrame,
         sens_df: pd.DataFrame,
-        expenditure_df: pd.DataFrame,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Validate and enrich extracted data with matching yfinance values.
 
-        The returned frames follow the same order as the arguments. SENS fields
-        are retained because yfinance has no equivalent source for corporate
-        event values, counterparties, or announcement metadata. Annual company
-        statement values are matched to report dates within seven days and
-        scaled to the row's reporting unit. Current yfinance market fields are
-        also filled or replaced where available.
+        The argument and return order matches extraction and standardization:
+        ``(external_df, sens_df)``. SENS fields are retained because yfinance
+        has no equivalent source for corporate
+        event values, counterparties, or announcement metadata. Company
+        statement values are matched to report dates within seven days. Both
+        extracted and yfinance monetary values are expected in base units.
+        Annual and quarterly statements,
+        quote/fast-info market fields, major-holder tables, info fallbacks, and
+        statement-derived working-capital days are all used where they map to
+        the external-data schema. Missing values include None, pandas NA/NaN,
+        empty strings, and empty collections; supplied mismatches are replaced
+        after a warning.
         """
+        if not isinstance(external_df, pd.DataFrame):
+            raise TypeError("external_df must be a pandas DataFrame")
         if not isinstance(sens_df, pd.DataFrame):
             raise TypeError("sens_df must be a pandas DataFrame")
-        if not isinstance(expenditure_df, pd.DataFrame):
-            raise TypeError("expenditure_df must be a pandas DataFrame")
+        if "event_value" in external_df.columns and any(
+            field in sens_df.columns
+            for field in ("reporting_unit", "reporting_currency", "revenue")
+        ):
+            raise ValueError(
+                "validate_external_data expects (external_df, sens_df); the "
+                "supplied dataframes appear to be reversed"
+            )
 
         validated_sens_df = sens_df.copy(deep=True)
-        validated_expenditure_df = expenditure_df.copy(deep=True)
-
-        if "currency" in validated_sens_df.columns:
-            if "original_currency" not in validated_sens_df.columns:
-                validated_sens_df["original_currency"] = (
-                    validated_sens_df["currency"].map(
-                        self._canonical_currency_code
-                    ).astype(object)
-                )
-            else:
-                validated_sens_df["original_currency"] = (
-                    validated_sens_df["original_currency"].astype(object)
-                )
-                missing_original = validated_sens_df[
-                    "original_currency"
-                ].map(lambda value: not self._has_value(value))
-                validated_sens_df.loc[
-                    missing_original, "original_currency"
-                ] = validated_sens_df.loc[missing_original, "currency"].map(
-                    self._canonical_currency_code
-                )
+        validated_expenditure_df = external_df.copy(deep=True)
 
         if "reporting_currency" in validated_expenditure_df.columns:
             if "original_currency" not in validated_expenditure_df.columns:
@@ -1023,7 +1245,14 @@ class Data_Processor:
             LOGGER.warning(
                 "Cannot validate expenditure data without a company column"
             )
-            return validated_sens_df, validated_expenditure_df
+            return validated_expenditure_df, validated_sens_df
+
+        self._require_base_units(
+            validated_expenditure_df,
+            EXTERNAL_MONETARY_FIELDS,
+            ("reporting_unit", "unit"),
+            "external_df",
+        )
 
         yfinance_cache = {}
         exchange_rate_cache = {}
@@ -1067,7 +1296,8 @@ class Data_Processor:
                 current_currency == "ZAR"
                 and self._canonical_reporting_unit(row.get("reporting_unit"))
                 == "units"
-                and "fx_rate_to_zar" in validated_expenditure_df.columns
+                and original_currency not in {None, "ZAR"}
+                and self._has_value(row.get("fx_rate_to_zar"))
             )
             if self._has_value(financial_currency):
                 self._set_yfinance_value(
@@ -1101,7 +1331,6 @@ class Data_Processor:
                     company,
                     ticker_symbol,
                 )
-            reporting_scale = self._reporting_scale(reporting_unit)
             validation_fx_rate = None
             if is_standardized_zar:
                 stored_rate = row.get("fx_rate_to_zar")
@@ -1128,16 +1357,18 @@ class Data_Processor:
                             row_index, "fx_rate_date"
                         ] = observed_date
 
+            statement_values = {}
             for field, (
                 statement_name, row_names, use_absolute_value
             ) in YFINANCE_STATEMENT_FIELDS.items():
-                value = self._statement_value(
-                    statements.get(statement_name), row_names, report_date
+                value = self._mapped_statement_value(
+                    statements, statement_name, row_names, report_date
                 )
                 if value is None:
                     continue
                 if use_absolute_value:
                     value = abs(value)
+                statement_values[field] = value
                 if is_standardized_zar:
                     if validation_fx_rate is None:
                         LOGGER.warning(
@@ -1148,8 +1379,36 @@ class Data_Processor:
                         )
                         continue
                     value *= validation_fx_rate
-                else:
-                    value /= reporting_scale
+                self._set_yfinance_value(
+                    validated_expenditure_df,
+                    row_index,
+                    field,
+                    value,
+                    company,
+                    ticker_symbol,
+                )
+
+            derived_values = {}
+            for field, (
+                balance_field, flow_field
+            ) in YFINANCE_DERIVED_WORKING_CAPITAL_FIELDS.items():
+                balance = statement_values.get(balance_field)
+                flow = statement_values.get(flow_field)
+                if balance is None or flow in (None, 0):
+                    continue
+                derived_values[field] = abs(float(balance) / float(flow)) * 365
+
+            if all(
+                field in derived_values
+                for field in ("receivable_days", "payable_days", "inventory_days")
+            ):
+                derived_values["cash_conversion_cycle"] = (
+                    derived_values["inventory_days"]
+                    + derived_values["receivable_days"]
+                    - derived_values["payable_days"]
+                )
+
+            for field, value in derived_values.items():
                 self._set_yfinance_value(
                     validated_expenditure_df,
                     row_index,
@@ -1160,6 +1419,8 @@ class Data_Processor:
                 )
 
             for field, info_names in YFINANCE_INFO_FIELDS.items():
+                if field in statement_values:
+                    continue
                 value = next(
                     (
                         info.get(info_name)
@@ -1168,6 +1429,8 @@ class Data_Processor:
                     ),
                     None,
                 )
+                if field in EXTERNAL_NUMERIC_FIELDS:
+                    value = self._numeric_value(value)
                 if self._has_value(value) and field in EXTERNAL_MONETARY_FIELDS:
                     if is_standardized_zar:
                         if validation_fx_rate is None:
@@ -1179,11 +1442,6 @@ class Data_Processor:
                             )
                             continue
                         value = float(value) * validation_fx_rate
-                    elif field in {
-                        "market_capitalisation",
-                        "enterprise_value",
-                    }:
-                        value = float(value) / reporting_scale
                 self._set_yfinance_value(
                     validated_expenditure_df,
                     row_index,
@@ -1193,7 +1451,7 @@ class Data_Processor:
                     ticker_symbol,
                 )
 
-        return validated_sens_df, validated_expenditure_df
+        return validated_expenditure_df, validated_sens_df
 
     @classmethod
     def _history_rate_on_or_before(cls, ticker_symbol, valuation_date):
@@ -1304,7 +1562,7 @@ class Data_Processor:
         sens_df: pd.DataFrame,
         fx_as_of_date=None,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Scale monetary values and convert them to ZAR.
+        """Convert base-unit monetary values to ZAR.
 
         SENS rates use ``announcement_date`` and external-data rates use
         ``report_date``. ``fx_as_of_date`` is only a deterministic fallback for
@@ -1314,9 +1572,11 @@ class Data_Processor:
         The input frames are never modified. The argument and return order
         matches ``extract_external_data_from_pdfs``:
         ``(external_df, sens_df)``.
-        Successfully converted rows have base ``units``, currency ``ZAR``, and
+        Inputs are expected to contain base-unit values produced by extraction;
+        this function does not expand thousands, millions, or billions.
+        Successfully converted rows have currency ``ZAR`` and
         audit columns ``original_currency``, ``fx_rate_to_zar`` and
-        ``fx_rate_date``. If no historical rate is available, scaled values and
+        ``fx_rate_date``. If no historical rate is available, original values and
         the original currency are retained rather than being mislabeled as ZAR.
         """
         if not isinstance(external_df, pd.DataFrame):
@@ -1336,39 +1596,23 @@ class Data_Processor:
         standardized_sens_df = sens_df.copy(deep=True)
         standardized_external_df = external_df.copy(deep=True)
 
-        # CSV imports can give these columns pandas' dedicated StringDtype.
-        # Standardization replaces their serialized text with Python lists,
-        # which StringArray cannot store, so make that representation explicit.
-        for column in ("currencies_exposed_to", "countries_of_operation"):
-            if column in standardized_external_df.columns:
-                standardized_external_df[column] = (
-                    standardized_external_df[column].astype(object)
-                )
-        if "banking_opportunities" in standardized_sens_df.columns:
-            standardized_sens_df["banking_opportunities"] = (
-                standardized_sens_df["banking_opportunities"].astype(object)
-            )
+        self._require_base_units(
+            standardized_external_df,
+            EXTERNAL_MONETARY_FIELDS,
+            ("reporting_unit", "unit"),
+            "external_df",
+        )
+        self._require_base_units(
+            standardized_sens_df,
+            ("event_value",),
+            ("event_unit", "unit"),
+            "sens_df",
+        )
 
         fallback_date = self._iso_date(fx_as_of_date)
         if fx_as_of_date is not None and fallback_date is None:
             raise ValueError("fx_as_of_date must be a valid date")
         rate_cache = {}
-
-        if (
-            "reporting_unit" not in standardized_external_df.columns
-            and "unit" in standardized_external_df.columns
-        ):
-            standardized_external_df["reporting_unit"] = (
-                standardized_external_df["unit"]
-            )
-        if (
-            "reporting_unit" not in standardized_external_df.columns
-            and any(
-                field in standardized_external_df.columns
-                for field in EXTERNAL_SCALED_MONETARY_FIELDS
-            )
-        ):
-            standardized_external_df["reporting_unit"] = "units"
 
         for field in EXTERNAL_NUMERIC_FIELDS.intersection(
             standardized_external_df.columns
@@ -1394,53 +1638,10 @@ class Data_Processor:
                 standardized_external_df["fx_rate_date"] = pd.NA
 
         for row_index, row in standardized_external_df.iterrows():
-            if "company" in standardized_external_df.columns:
-                standardized_external_df.at[row_index, "company"] = (
-                    self._canonical_company_name(row.get("company"))
-                )
             if "report_date" in standardized_external_df.columns:
                 report_date = self._iso_date(row.get("report_date"))
-                standardized_external_df.at[row_index, "report_date"] = report_date
             else:
                 report_date = None
-
-            unit = self._canonical_reporting_unit(row.get("reporting_unit"))
-            scale = self._reporting_scale(unit)
-            for field in EXTERNAL_SCALED_MONETARY_FIELDS.intersection(
-                standardized_external_df.columns
-            ):
-                value = standardized_external_df.at[row_index, field]
-                if self._has_value(value):
-                    standardized_external_df.at[row_index, field] = (
-                        float(value) * scale
-                    )
-            if "reporting_unit" in standardized_external_df.columns:
-                standardized_external_df.at[row_index, "reporting_unit"] = "units"
-            if "unit" in standardized_external_df.columns:
-                standardized_external_df.at[row_index, "unit"] = "units"
-
-            if "currencies_exposed_to" in standardized_external_df.columns:
-                currency_codes = {
-                    self._canonical_currency_code(value)
-                    for value in self._list_values(
-                        row.get("currencies_exposed_to")
-                    )
-                    if self._has_value(value)
-                }
-                standardized_external_df.at[
-                    row_index, "currencies_exposed_to"
-                ] = sorted(value for value in currency_codes if value)
-            if "countries_of_operation" in standardized_external_df.columns:
-                country_codes = {
-                    self._canonical_country_code(value)
-                    for value in self._list_values(
-                        row.get("countries_of_operation")
-                    )
-                    if self._has_value(value)
-                }
-                standardized_external_df.at[
-                    row_index, "countries_of_operation"
-                ] = sorted(value for value in country_codes if value)
 
             if "reporting_currency" not in standardized_external_df.columns:
                 continue
@@ -1495,12 +1696,6 @@ class Data_Processor:
             standardized_sens_df["event_value"] = pd.to_numeric(
                 standardized_sens_df["event_value"], errors="coerce"
             ).astype(float)
-            if "event_unit" not in standardized_sens_df.columns:
-                standardized_sens_df["event_unit"] = (
-                    standardized_sens_df["unit"]
-                    if "unit" in standardized_sens_df.columns
-                    else "units"
-                )
         if "currency" in standardized_sens_df.columns:
             if "original_currency" not in standardized_sens_df.columns:
                 standardized_sens_df["original_currency"] = (
@@ -1518,43 +1713,10 @@ class Data_Processor:
                 standardized_sens_df["fx_rate_date"] = pd.NA
 
         for row_index, row in standardized_sens_df.iterrows():
-            if "company" in standardized_sens_df.columns:
-                standardized_sens_df.at[row_index, "company"] = (
-                    self._canonical_company_name(row.get("company"))
-                )
             if "announcement_date" in standardized_sens_df.columns:
                 announcement_date = self._iso_date(row.get("announcement_date"))
-                standardized_sens_df.at[
-                    row_index, "announcement_date"
-                ] = announcement_date
             else:
                 announcement_date = None
-            if "expected_completion_date" in standardized_sens_df.columns:
-                standardized_sens_df.at[
-                    row_index, "expected_completion_date"
-                ] = self._iso_date(row.get("expected_completion_date"))
-            if "country" in standardized_sens_df.columns:
-                standardized_sens_df.at[row_index, "country"] = (
-                    self._canonical_country_code(row.get("country"))
-                )
-            if "banking_opportunities" in standardized_sens_df.columns:
-                standardized_sens_df.at[
-                    row_index, "banking_opportunities"
-                ] = self._sorted_unique(row.get("banking_opportunities"))
-
-            unit = self._canonical_reporting_unit(row.get("event_unit"))
-            if "event_value" in standardized_sens_df.columns:
-                event_value = standardized_sens_df.at[row_index, "event_value"]
-                if self._has_value(event_value):
-                    standardized_sens_df.at[row_index, "event_value"] = (
-                        float(event_value) * self._reporting_scale(unit)
-                    )
-                    if "event_unit" in standardized_sens_df.columns:
-                        standardized_sens_df.at[row_index, "event_unit"] = "units"
-                    if "unit" in standardized_sens_df.columns:
-                        standardized_sens_df.at[row_index, "unit"] = "units"
-                elif "event_unit" in standardized_sens_df.columns:
-                    standardized_sens_df.at[row_index, "event_unit"] = None
 
             if "currency" not in standardized_sens_df.columns:
                 continue
@@ -1612,13 +1774,13 @@ class Data_Processor:
         )
 
     def process_data(self, source_dir=None, fx_as_of_date=None):
-        """Run extraction, yfinance validation, scaling, and ZAR conversion."""
+        """Run extraction, yfinance validation, and ZAR conversion."""
         if source_dir is None:
             external_df, sens_df = self.extract_external_data_from_pdfs()
         else:
             external_df, sens_df = self.extract_external_data_from_pdfs(source_dir)
-        validated_sens, validated_external = self.validate_external_data(
-            sens_df, external_df
+        validated_external, validated_sens = self.validate_external_data(
+            external_df, sens_df
         )
         standardized_external, standardized_sens = self.standardize_data(
             validated_external,
