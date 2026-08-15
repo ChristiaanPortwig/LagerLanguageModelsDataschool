@@ -181,6 +181,39 @@ Return only the structured output required by the schema.
 """
 
 
+SENS_OPPORTUNITY_SCORING_PROMPT = """
+You are rating the corporate-banking opportunities described by selected rows
+from a SENS announcement dataframe.
+
+Input rows (JSON):
+{sens_json}
+
+Return exactly one score record for every input row. Copy each `_row_id`
+exactly into the response `row_id`. Do not omit, duplicate, or invent row IDs.
+
+Give each row an independent opportunity score from 0 to 1 for each pillar:
+- Transactional banking: payments, collections, liquidity management, trade
+  finance, and guarantees.
+- Global markets: foreign exchange, interest rates, and commodities.
+- Investment banking: lending, debt and equity capital markets, corporate
+  finance/advisory, and project finance.
+
+Scoring rules:
+- 0 means the announcement provides no evidence of an opportunity for that
+  pillar; 1 means it provides direct evidence of an exceptionally strong and
+  actionable opportunity.
+- Base scores only on information in that row. Do not use outside knowledge or
+  fabricate transaction values, funding needs, exposures, or mandates.
+- Consider event type, value, currency, country, counterparties, dates,
+  banking opportunities, the opportunity summary, and extra notes when present.
+- A theoretically possible banking product is not enough for a high score.
+  High scores require a direct, material, and actionable connection.
+- Score all three pillars even when one or more scores are zero.
+
+Return only the structured output required by the schema.
+"""
+
+
 DOCUMENT_FILENAME_VALIDATION_PROMPT = """
 You are validating filenames of downloaded financial reports. The documents
 belong to listed companies and will later be used for financial-data extraction.

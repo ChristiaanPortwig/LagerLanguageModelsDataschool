@@ -9,6 +9,7 @@ from pypdf import PdfReader, PdfWriter
 
 from backend.config.gemini_structured_schemas import (
     CompanyLevelExtDataCombinationResponse,
+    SENSOpportunityScoresResponse,
     SENSEventsResponse,
 )
 from backend.scripts.data_processing import Data_Processor
@@ -203,6 +204,105 @@ class DataProcessorTests(unittest.TestCase):
         self.assertEqual(company_df.iloc[0]["revenue"], 120)
         self.assertTrue(sens_df.empty)
 
+    def test_failed_pdf_returns_company_and_document_keywords(self):
+        processor = Data_Processor()
+
+        with tempfile.TemporaryDirectory() as directory:
+            company_dir = Path(directory) / "Glencore"
+            company_dir.mkdir()
+            failed_document = (
+                company_dir / "annual_report__2025__unreadable.pdf"
+            )
+            self.write_blank_pdf(failed_document)
+
+            with patch.object(
+                processor.gemini_client,
+                "call_gemini_structured_json",
+                side_effect=RuntimeError("permanent failure"),
+            ), patch("backend.scripts.data_processing.time.sleep"):
+                company_df, sens_df, failures = (
+                    processor.extract_external_data_from_pdfs(
+                        directory, return_failures=True
+                    )
+                )
+
+        self.assertTrue(company_df.empty)
+        self.assertTrue(sens_df.empty)
+        self.assertEqual(failures, {"Glencore": ["annual report"]})
+        self.assertEqual(processor.get_failed_scrape_keywords(), failures)
+
+    def test_scores_only_sens_rows_with_missing_opportunity_ratings(self):
+        processor = Data_Processor()
+        sens = pd.DataFrame([
+            {
+                "company": "Already scored",
+                "event_type": "dividend",
+                "transactional_banking_opportunity_score": 0.4,
+                "global_markets_opportunity_score": 0.1,
+                "investment_banking_opportunity_score": 0.0,
+            },
+            {
+                "company": "Needs scoring",
+                "event_type": "bond_issue",
+                "transactional_banking_opportunity_score": 0.2,
+            },
+        ])
+
+        with patch.object(
+            processor.gemini_client,
+            "call_gemini_structured_json",
+            return_value={
+                "scores": [{
+                    "row_id": 1,
+                    "transactional_banking_opportunity_score": 0.9,
+                    "global_markets_opportunity_score": 0.6,
+                    "investment_banking_opportunity_score": 0.95,
+                }]
+            },
+        ) as gemini_call, patch(
+            "backend.scripts.data_processing.time.sleep"
+        ):
+            scored = processor.score_sens_opportunities(sens)
+
+        self.assertNotIn(
+            "global_markets_opportunity_score", sens.iloc[1].dropna().index
+        )
+        self.assertEqual(
+            scored.loc[0, "transactional_banking_opportunity_score"], 0.4
+        )
+        self.assertEqual(
+            scored.loc[1, "transactional_banking_opportunity_score"], 0.2
+        )
+        self.assertEqual(
+            scored.loc[1, "global_markets_opportunity_score"], 0.6
+        )
+        self.assertEqual(
+            scored.loc[1, "investment_banking_opportunity_score"], 0.95
+        )
+        schema, prompt, pdf_source = gemini_call.call_args.args
+        self.assertIs(schema, SENSOpportunityScoresResponse)
+        self.assertIsNone(pdf_source)
+        self.assertIn('"_row_id":1', prompt)
+        self.assertIn('"company":"Needs scoring"', prompt)
+        self.assertNotIn("Already scored", prompt)
+
+    def test_complete_sens_scores_do_not_call_gemini(self):
+        processor = Data_Processor()
+        sens = pd.DataFrame([{
+            "company": "Complete",
+            "transactional_banking_opportunity_score": 0.5,
+            "global_markets_opportunity_score": 0.5,
+            "investment_banking_opportunity_score": 0.5,
+        }])
+
+        with patch.object(
+            processor.gemini_client, "call_gemini_structured_json"
+        ) as gemini_call:
+            scored = processor.score_sens_opportunities(sens)
+
+        gemini_call.assert_not_called()
+        pd.testing.assert_frame_equal(scored, sens)
+
     def test_final_gemini_batch_reconciles_candidates_without_mechanical_merge(self):
         processor = Data_Processor()
         candidates = [
@@ -352,6 +452,133 @@ class DataProcessorTests(unittest.TestCase):
         )
         self.assertIn("revenue differs", "\n".join(logs.output))
         self.assertIn("share_price differs", "\n".join(logs.output))
+
+    def test_yfinance_only_warns_for_numeric_differences_above_five_percent(self):
+        within_tolerance = pd.DataFrame([{"revenue": 100.0}])
+        above_tolerance = pd.DataFrame([{"revenue": 100.0}])
+
+        with self.assertNoLogs(
+            "backend.scripts.data_processing", level="WARNING"
+        ):
+            Data_Processor._set_yfinance_value(
+                within_tolerance,
+                0,
+                "revenue",
+                105.0,
+                "Example Company",
+                "EXM.JO",
+            )
+
+        with self.assertLogs(
+            "backend.scripts.data_processing", level="WARNING"
+        ) as logs:
+            Data_Processor._set_yfinance_value(
+                above_tolerance,
+                0,
+                "revenue",
+                110.0,
+                "Example Company",
+                "EXM.JO",
+            )
+
+        self.assertEqual(within_tolerance.iloc[0]["revenue"], 105.0)
+        self.assertEqual(above_tolerance.iloc[0]["revenue"], 110.0)
+        self.assertIn("revenue differs", "\n".join(logs.output))
+
+    def test_yfinance_keeps_repaired_jse_quote_fields_in_zar(self):
+        processor = Data_Processor()
+        external_df = pd.DataFrame([{
+            "company": "AngloGold Ashanti",
+            "report_date": "2025-12-31",
+            "reporting_currency": "ZAR",
+            "original_currency": "USD",
+            "reporting_unit": "units",
+            "fx_rate_to_zar": 18.0,
+            "share_price": 150.0,
+        }])
+
+        ticker = MagicMock()
+        ticker.info = {
+            "currency": "ZAc",
+            "financialCurrency": "USD",
+            "currentPrice": 15_005.0,
+            "marketCap": 289_860_976_640,
+            "enterpriseValue": 367_061_991_424,
+        }
+        ticker.history.return_value = pd.DataFrame(
+            {"Close": [150.05]},
+            index=[pd.Timestamp("2026-08-14")],
+        )
+        ticker.get_history_metadata.return_value = {"currency": "ZAR"}
+        ticker.get_income_stmt.return_value = pd.DataFrame()
+        ticker.get_balance_sheet.return_value = pd.DataFrame()
+        ticker.get_cash_flow.return_value = pd.DataFrame()
+        ticker.get_institutional_holders.return_value = pd.DataFrame()
+        ticker.get_mutualfund_holders.return_value = pd.DataFrame()
+
+        with patch(
+            "backend.scripts.data_processing.yf.Ticker",
+            return_value=ticker,
+        ):
+            validated, _ = processor.validate_external_data(
+                external_df, pd.DataFrame()
+            )
+
+        row = validated.iloc[0]
+        self.assertEqual(row["share_price"], 150.05)
+        self.assertEqual(row["market_capitalisation"], 289_860_976_640)
+        self.assertEqual(row["enterprise_value"], 367_061_991_424)
+        ticker.history.assert_called_once_with(
+            period="5d",
+            auto_adjust=False,
+            repair=True,
+        )
+        ticker.get_history_metadata.assert_called_once_with(repair=True)
+
+    def test_yfinance_converts_zar_quote_fields_to_raw_row_currency(self):
+        processor = Data_Processor()
+        external_df = pd.DataFrame([{
+            "company": "AngloGold Ashanti",
+            "report_date": "2025-12-31",
+            "reporting_currency": "USD",
+            "reporting_unit": "units",
+        }])
+
+        ticker = MagicMock()
+        ticker.info = {
+            "currency": "ZAc",
+            "financialCurrency": "USD",
+            "currentPrice": 15_005.0,
+            "marketCap": 289_860_976_640,
+        }
+        ticker.history.return_value = pd.DataFrame(
+            {"Close": [150.05]},
+            index=[pd.Timestamp("2026-08-14")],
+        )
+        ticker.get_history_metadata.return_value = {"currency": "ZAR"}
+        ticker.get_income_stmt.return_value = pd.DataFrame()
+        ticker.get_balance_sheet.return_value = pd.DataFrame()
+        ticker.get_cash_flow.return_value = pd.DataFrame()
+        ticker.get_institutional_holders.return_value = pd.DataFrame()
+        ticker.get_mutualfund_holders.return_value = pd.DataFrame()
+
+        with patch(
+            "backend.scripts.data_processing.yf.Ticker",
+            return_value=ticker,
+        ), patch.object(
+            processor,
+            "_zar_exchange_rate",
+            return_value=(18.0, "2025-12-31"),
+        ):
+            validated, _ = processor.validate_external_data(
+                external_df, pd.DataFrame()
+            )
+
+        row = validated.iloc[0]
+        self.assertAlmostEqual(row["share_price"], 150.05 / 18.0)
+        self.assertAlmostEqual(
+            row["market_capitalisation"], 289_860_976_640 / 18.0
+        )
 
     def test_yfinance_fills_all_supported_missing_fields(self):
         processor = Data_Processor()

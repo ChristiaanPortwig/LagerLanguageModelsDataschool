@@ -53,10 +53,12 @@ All dataframe-returning methods use `(external_df, sens_df)` order.
 | Method | Purpose |
 |--------|---------|
 | `prepare_incremental_data(...)` | Loads or creates dataframe checkpoints and initializes document state before scraping. |
-| `process_new_data(..., process_scope="all")` | Processes untracked PDFs, refreshes changed companies, appends new SENS events, and updates `data/json`. |
-| `process_data(...)` | Runs incremental processing, yfinance filling, ZAR standardization, and checkpoint saving. It does not scrape. |
+| `process_new_data(..., process_scope="all", return_failures=False)` | Processes untracked PDFs, refreshes changed companies, appends new SENS events, and updates `data/json`. Optionally returns failed document keywords by company. |
+| `process_data(..., return_failures=False)` | Runs incremental processing, yfinance filling, ZAR standardization, and checkpoint saving. It does not scrape. Optionally returns failed document keywords by company. |
 | `save_current_data(external_data, sens_data, ...)` | Writes the current processed dataframes to the JSON directory. |
-| `extract_external_data_from_pdfs(source_dir=...)` | Low-level extraction that processes every PDF supplied; it bypasses incremental selection. |
+| `extract_external_data_from_pdfs(source_dir=..., return_failures=False)` | Low-level extraction that processes every PDF supplied; it bypasses incremental selection and can return failed document keywords by company. |
+| `get_failed_scrape_keywords()` | Returns the most recent PDF extraction failures as `{company: [document keywords]}`. |
+| `score_sens_opportunities(sens_df)` | Fills missing transactional-banking, global-markets, and investment-banking opportunity scores (0–1) with Gemini. |
 | `validate_external_data(external_df, sens_df)` | Fills missing values and replaces mismatches using yfinance. |
 | `standardize_data(external_df, sens_df, fx_as_of_date=None)` | Converts monetary values to base-unit ZAR and adds FX audit columns. |
 | `standardize_external_data(...)` | Compatibility alias for `standardize_data`. |

@@ -19,11 +19,13 @@ from pypdf import PdfWriter
 from config.gemini_structured_schemas import (
     CompanyLevelExtDataCombinationResponse,
     CompanyLevelExtDataResponse,
+    SENSOpportunityScoresResponse,
     SENSEventsResponse,
 )
 from config.prompts import (
     COMPANY_LEVEL_COMBINATION_PROMPT,
     COMPANY_LEVEL_PROMPT,
+    SENS_OPPORTUNITY_SCORING_PROMPT,
     SENS_PROMPT,
 )
 from .gemini_client import Gemini_Client
@@ -289,6 +291,19 @@ EXTERNAL_MONETARY_FIELDS = EXTERNAL_NUMERIC_FIELDS - {
 EXTERNAL_SCALED_MONETARY_FIELDS = EXTERNAL_MONETARY_FIELDS - {"share_price"}
 
 
+YFINANCE_NUMERIC_WARNING_REL_TOLERANCE = 0.05
+
+
+# Yahoo reports JSE quote prices in cents (ZAc), while repaired price history
+# and quote-derived valuation fields are expressed in rand. These fields must
+# not be converted using an issuer's financial-statement currency.
+YFINANCE_ZAR_QUOTE_FIELDS = {
+    "market_capitalisation",
+    "share_price",
+    "enterprise_value",
+}
+
+
 YFINANCE_STATEMENT_FIELDS = {
     "revenue": (
         "income",
@@ -416,7 +431,11 @@ YFINANCE_INFO_FIELDS = {
     "operating_cash_flow": ("operatingCashflow",),
     "total_debt": ("totalDebt",),
     "market_capitalisation": ("marketCap",),
-    "share_price": ("currentPrice", "regularMarketPrice"),
+    "share_price": (
+        "_zarSharePrice",
+        "currentPrice",
+        "regularMarketPrice",
+    ),
     "share_return": ("52WeekChange",),
     "enterprise_value": ("enterpriseValue",),
     "employee_count": ("fullTimeEmployees",),
@@ -448,6 +467,11 @@ class Data_Processor:
     PROCESSED_DOCUMENTS_FILE = "processed_documents.json"
     EXTERNAL_DATA_FILE = "current_external_data.json"
     SENS_DATA_FILE = "current_sens_data.json"
+    SENS_OPPORTUNITY_SCORE_COLUMNS = (
+        "transactional_banking_opportunity_score",
+        "global_markets_opportunity_score",
+        "investment_banking_opportunity_score",
+    )
 
     def __init__(self):
         self.gemini_client = Gemini_Client()
@@ -455,6 +479,7 @@ class Data_Processor:
             "external_documents": set(),
             "sens_documents": set(),
         }
+        self.last_failed_scrapes: dict[str, list[str]] = {}
 
     def prepare_incremental_data(
         self,
@@ -513,13 +538,15 @@ class Data_Processor:
         source_dir=None,
         json_location=None,
         process_scope="all",
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        return_failures: bool = False,
+    ):
         """Extract only documents not recorded in the JSON manifest.
 
         A changed non-SENS report reprocesses all reports for that company and
         replaces its current company row. Only changed SENS PDFs are processed
         and appended. Processing state and updated raw frames are written to
-        the JSON directory before this method returns.
+        the JSON directory before this method returns. Set ``return_failures``
+        to receive the failed-scrape keyword dictionary as a third value.
         """
         if process_scope not in {"all", "sens"}:
             raise ValueError("process_scope must be either 'all' or 'sens'")
@@ -563,6 +590,7 @@ class Data_Processor:
         updated_external = current_external_data.copy(deep=True)
         updated_sens = current_sens_data.copy(deep=True)
         processed_now = set()
+        failed_scrapes: dict[str, set[str]] = {}
 
         if changed_companies:
             with TemporaryDirectory(prefix="external_updates_") as temp_dir:
@@ -580,6 +608,9 @@ class Data_Processor:
                         )
                 extracted_external, _ = self.extract_external_data_from_pdfs(
                     batch_dir
+                )
+                self._merge_failed_scrapes(
+                    failed_scrapes, self.last_failed_scrapes
                 )
                 successful_external_paths = self._successful_batch_paths(
                     "external_documents", batch_dir, company_documents
@@ -618,6 +649,9 @@ class Data_Processor:
                 _, extracted_sens = self.extract_external_data_from_pdfs(
                     batch_dir
                 )
+                self._merge_failed_scrapes(
+                    failed_scrapes, self.last_failed_scrapes
+                )
                 successful_sens_paths = self._successful_batch_paths(
                     "sens_documents", batch_dir, changed_sens
                 )
@@ -631,7 +665,31 @@ class Data_Processor:
             updated_external, updated_sens, json_location=json_dir
         )
         self._write_processed_documents(processed_documents, state_path)
+        self.last_failed_scrapes = {
+            company: sorted(keywords)
+            for company, keywords in sorted(failed_scrapes.items())
+            if keywords
+        }
+        if return_failures:
+            return updated_external, updated_sens, self.get_failed_scrape_keywords()
         return updated_external, updated_sens
+
+    @staticmethod
+    def _merge_failed_scrapes(target: dict[str, set[str]], additions) -> None:
+        for company, keywords in additions.items():
+            target.setdefault(company, set()).update(keywords)
+
+    def get_failed_scrape_keywords(self) -> dict[str, list[str]]:
+        """Return failed PDF extraction keywords grouped by company.
+
+        Keys are canonical company names. Values are stable, human-readable
+        document keywords such as ``"annual report"`` or ``"SENS"``. The
+        returned dictionary is a copy and can be safely mutated by callers.
+        """
+        return {
+            company: list(keywords)
+            for company, keywords in self.last_failed_scrapes.items()
+        }
 
     def save_current_data(
         self,
@@ -1105,7 +1163,12 @@ class Data_Processor:
             )
         return normalised
 
-    def extract_external_data_from_pdfs(self, source_dir = Path(__file__).resolve().parents[2] / 'data' / 'downloads') -> tuple[pd.DataFrame, pd.DataFrame]:
+    def extract_external_data_from_pdfs(
+        self,
+        source_dir=Path(__file__).resolve().parents[2] / "data" / "downloads",
+        *,
+        return_failures: bool = False,
+    ):
         """
         Extracts external data from the pdfs in each company directory in the source directory.
 
@@ -1115,15 +1178,20 @@ class Data_Processor:
             data/downloads by default
 
         Returns:
-            (curr_company_lvl_df, cur_sens_df)
+            ``(curr_company_lvl_df, curr_sens_df)``. When ``return_failures``
+            is true, a third value maps company names to the keywords for PDFs
+            that could not be extracted.
         """
 
+        source_path = Path(source_dir)
         self.last_extraction_status = {
             "external_documents": set(),
             "sens_documents": set(),
         }
+        self.last_failed_scrapes = {}
+        attempted_documents: set[Path] = set()
         company_dirs = sorted(
-            path for path in Path(source_dir).iterdir() if path.is_dir()
+            path for path in source_path.iterdir() if path.is_dir()
         )
         company_records = []
         sens_records = []
@@ -1133,6 +1201,7 @@ class Data_Processor:
             # Non-SENS documents must be processed independently so that Gemini
             # cannot combine or confuse values from different reporting periods.
             for document_path in sorted(company_dir.glob("*.pdf")):
+                attempted_documents.add(document_path.resolve())
                 curr_company_lvl_json = self._call_gemini_with_retry(
                     CompanyLevelExtDataResponse,
                     COMPANY_LEVEL_PROMPT.format(company=canonical_company),
@@ -1155,6 +1224,7 @@ class Data_Processor:
             sens_paths = sorted((company_dir / "SENS").glob("*.pdf"))
             if not sens_paths:
                 continue
+            attempted_documents.update(path.resolve() for path in sens_paths)
 
             with TemporaryDirectory(prefix="merged_sens_") as temp_dir:
                 merged_sens_path = (
@@ -1212,7 +1282,159 @@ class Data_Processor:
                     sort_columns, kind="stable", na_position="last"
                 ).reset_index(drop=True)
 
+        successful_documents = {
+            Path(path).resolve()
+            for paths in self.last_extraction_status.values()
+            for path in paths
+        }
+        self.last_failed_scrapes = self._failed_scrape_keywords(
+            source_path,
+            attempted_documents - successful_documents,
+        )
+        if return_failures:
+            return (
+                curr_company_df,
+                curr_sens_df,
+                self.get_failed_scrape_keywords(),
+            )
         return curr_company_df, curr_sens_df
+
+    @classmethod
+    def _failed_scrape_keywords(
+        cls, source_dir: Path, failed_paths: set[Path]
+    ) -> dict[str, list[str]]:
+        """Build deterministic company-to-document-keyword diagnostics."""
+        failures: dict[str, set[str]] = {}
+        source_dir = source_dir.resolve()
+        known_document_types = {
+            "annual_report",
+            "financial_statements",
+            "interim_results",
+            "results_presentation",
+        }
+        for path in sorted(failed_paths, key=lambda item: str(item)):
+            try:
+                relative = path.resolve().relative_to(source_dir)
+            except (OSError, ValueError):
+                LOGGER.warning("Ignoring failed extraction outside source: %s", path)
+                continue
+            if len(relative.parts) < 2:
+                continue
+
+            company = cls._canonical_company_name(relative.parts[0])
+            if "SENS" in relative.parts[1:-1]:
+                keyword = "SENS"
+            else:
+                prefix = relative.name.split("__", 1)[0]
+                if prefix in known_document_types:
+                    keyword = prefix.replace("_", " ")
+                else:
+                    keyword = re.sub(
+                        r"[^a-z0-9]+", " ", relative.stem.casefold()
+                    ).strip()
+            if company and keyword:
+                failures.setdefault(company, set()).add(keyword)
+
+        return {
+            company: sorted(keywords)
+            for company, keywords in sorted(failures.items())
+        }
+
+    def score_sens_opportunities(self, sens_df: pd.DataFrame) -> pd.DataFrame:
+        """Fill missing SENS opportunity ratings with one Gemini batch call.
+
+        A row is sent only when at least one of the three pillar score columns
+        is absent or null. Existing scores are preserved, including when
+        Gemini returns a replacement value for them. The input dataframe is
+        never modified.
+        """
+        if not isinstance(sens_df, pd.DataFrame):
+            raise TypeError("sens_df must be a pandas DataFrame")
+
+        scored = sens_df.copy(deep=True)
+        for column in self.SENS_OPPORTUNITY_SCORE_COLUMNS:
+            if column not in scored.columns:
+                scored[column] = math.nan
+
+        missing_positions = [
+            position
+            for position in range(len(scored))
+            if any(
+                not self._has_value(scored.iloc[position][column])
+                for column in self.SENS_OPPORTUNITY_SCORE_COLUMNS
+            )
+        ]
+        if not missing_positions:
+            return scored
+
+        pending = scored.iloc[missing_positions].copy()
+        pending = pending.drop(columns=["_row_id"], errors="ignore")
+        pending.insert(0, "_row_id", missing_positions)
+        sens_json = pending.to_json(
+            orient="records", date_format="iso", force_ascii=False
+        )
+        response = self._call_gemini_with_retry(
+            SENSOpportunityScoresResponse,
+            SENS_OPPORTUNITY_SCORING_PROMPT.format(sens_json=sens_json),
+            None,
+        )
+        if response is None:
+            return scored
+
+        expected_positions = set(missing_positions)
+        reviewed_positions = set()
+        for rating in response.get("scores", []):
+            row_id = rating.get("row_id")
+            if (
+                isinstance(row_id, bool)
+                or not isinstance(row_id, Number)
+                or not math.isfinite(float(row_id))
+                or int(row_id) != row_id
+            ):
+                row_position = None
+            else:
+                row_position = int(row_id)
+            if (
+                row_position not in expected_positions
+                or row_position in reviewed_positions
+            ):
+                LOGGER.warning(
+                    "Gemini returned an unknown or duplicate SENS row_id: %s",
+                    row_id,
+                )
+                continue
+            reviewed_positions.add(row_position)
+            for column in self.SENS_OPPORTUNITY_SCORE_COLUMNS:
+                if self._has_value(scored.iloc[row_position][column]):
+                    continue
+                score = self._bounded_opportunity_score(rating.get(column))
+                if score is None:
+                    LOGGER.warning(
+                        "Gemini returned an invalid %s for SENS row_id %s",
+                        column,
+                        row_position,
+                    )
+                    continue
+                scored.iat[
+                    row_position, scored.columns.get_loc(column)
+                ] = score
+
+        missing_reviews = expected_positions - reviewed_positions
+        if missing_reviews:
+            LOGGER.warning(
+                "Gemini did not score SENS row_ids: %s",
+                ", ".join(str(row_id) for row_id in sorted(missing_reviews)),
+            )
+        return scored
+
+    @staticmethod
+    def _bounded_opportunity_score(value) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, Number):
+            return None
+        score = float(value)
+        if not math.isfinite(score) or not 0 <= score <= 1:
+            return None
+        return score
 
     @staticmethod
     def _normalise_company_name(company) -> str:
@@ -1419,7 +1641,7 @@ class Data_Processor:
                 values_match = math.isclose(
                     float(current_value),
                     float(yfinance_value),
-                    rel_tol=1e-9,
+                    rel_tol=YFINANCE_NUMERIC_WARNING_REL_TOLERANCE,
                     abs_tol=1e-9,
                 )
             except (TypeError, ValueError):
@@ -1485,12 +1707,60 @@ class Data_Processor:
                 value = fast_info.get(fast_name)
                 if isinstance(value, Number) and Data_Processor._has_value(value):
                     info[info_name] = value
+            if not Data_Processor._has_value(info.get("currency")):
+                fast_currency = fast_info.get("currency")
+                if isinstance(fast_currency, str) and fast_currency.strip():
+                    info["currency"] = fast_currency
         except Exception as error:
             LOGGER.warning(
                 "Could not load yfinance fast information for %s: %s",
                 ticker_symbol,
                 error,
             )
+
+        # ``currentPrice`` for JSE listings is normally returned in ZAc. A
+        # repaired history request performs yfinance's own ZAc-to-ZAR
+        # normalisation and also guards against occasional mixed-unit history.
+        try:
+            price_history = ticker.history(
+                period="5d",
+                auto_adjust=False,
+                repair=True,
+            )
+            price_metadata = ticker.get_history_metadata(repair=True) or {}
+            repaired_currency = Data_Processor._canonical_currency_code(
+                price_metadata.get("currency")
+            )
+            if (
+                isinstance(price_history, pd.DataFrame)
+                and not price_history.empty
+                and "Close" in price_history.columns
+                and repaired_currency == "ZAR"
+            ):
+                closes = pd.to_numeric(
+                    price_history["Close"], errors="coerce"
+                ).dropna()
+                if not closes.empty:
+                    info["_zarSharePrice"] = float(closes.iloc[-1])
+        except Exception as error:
+            LOGGER.warning(
+                "Could not load repaired ZAR share price for %s: %s",
+                ticker_symbol,
+                error,
+            )
+
+        # Retain a deterministic fallback when repaired history is unavailable.
+        # Do not divide blindly: the quote metadata must explicitly identify
+        # cents or rand.
+        if not Data_Processor._has_value(info.get("_zarSharePrice")):
+            raw_price = Data_Processor._numeric_value(
+                info.get("currentPrice", info.get("regularMarketPrice"))
+            )
+            raw_currency = str(info.get("currency", "")).strip().casefold()
+            if raw_price is not None and raw_currency == "zac":
+                info["_zarSharePrice"] = float(raw_price) / 100
+            elif raw_price is not None and raw_currency == "zar":
+                info["_zarSharePrice"] = float(raw_price)
 
         statements = {}
         statement_getters = {
@@ -1572,8 +1842,9 @@ class Data_Processor:
         quote/fast-info market fields, major-holder tables, info fallbacks, and
         statement-derived working-capital days are all used where they map to
         the external-data schema. Missing values include None, pandas NA/NaN,
-        empty strings, and empty collections; supplied mismatches are replaced
-        after a warning.
+        empty strings, and empty collections. Supplied values are replaced;
+        numeric differences above five percent and non-numeric mismatches are
+        logged first.
         """
         if not isinstance(external_df, pd.DataFrame):
             raise TypeError("external_df must be a pandas DataFrame")
@@ -1688,6 +1959,7 @@ class Data_Processor:
                         company,
                         ticker_symbol,
                     )
+                    current_currency = financial_currency
 
             report_date = self._parse_date(row.get("report_date"))
             reporting_unit = row.get("reporting_unit")
@@ -1801,7 +2073,35 @@ class Data_Processor:
                 )
                 if field in EXTERNAL_NUMERIC_FIELDS:
                     value = self._numeric_value(value)
-                if self._has_value(value) and field in EXTERNAL_MONETARY_FIELDS:
+                quote_currency = self._canonical_currency_code(
+                    info.get("currency")
+                )
+                is_zar_quote_field = (
+                    field in YFINANCE_ZAR_QUOTE_FIELDS
+                    and quote_currency == "ZAR"
+                )
+                if self._has_value(value) and is_zar_quote_field:
+                    if current_currency != "ZAR":
+                        rate_result = self._zar_exchange_rate(
+                            current_currency,
+                            report_date,
+                            exchange_rate_cache,
+                        )
+                        if rate_result is None:
+                            LOGGER.warning(
+                                "%s: cannot validate ZAR-quoted %s in %s "
+                                "without an exchange rate",
+                                company,
+                                field,
+                                current_currency,
+                            )
+                            continue
+                        quote_fx_rate, _ = rate_result
+                        value = float(value) / quote_fx_rate
+                elif (
+                    self._has_value(value)
+                    and field in EXTERNAL_MONETARY_FIELDS
+                ):
                     if is_standardized_zar:
                         if validation_fx_rate is None:
                             LOGGER.warning(
@@ -2151,8 +2451,13 @@ class Data_Processor:
         current_external_data=None,
         json_location=None,
         process_scope="all",
+        return_failures: bool = False,
     ):
-        """Incrementally extract, fill, and standardize downloaded data."""
+        """Incrementally extract, fill, and standardize downloaded data.
+
+        Set ``return_failures`` to receive the failed-scrape keyword dictionary
+        as a third return value.
+        """
         external_df, sens_df = self.prepare_incremental_data(
             current_sens_data=current_sens_data,
             current_external_data=current_external_data,
@@ -2179,4 +2484,10 @@ class Data_Processor:
             standardized_sens,
             json_location=json_location,
         )
+        if return_failures:
+            return (
+                standardized_external,
+                standardized_sens,
+                self.get_failed_scrape_keywords(),
+            )
         return standardized_external, standardized_sens
