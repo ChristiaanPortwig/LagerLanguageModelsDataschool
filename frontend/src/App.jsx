@@ -208,9 +208,9 @@ function OpportunityHeatmap({ clients, onSelectClient, compact = false }) {
 }
 
 const PILLARS = [
-  { key: 'txn_banking_pct', label: 'Transactional Banking' },
-  { key: 'cross_border_pct', label: 'Cross Border' },
-  { key: 'trade_finance_pct', label: 'Trade Finance' },
+  { key: 'syn_txn_banking_pct', label: 'Transactional Banking' },
+  { key: 'syn_global_markets_pct', label: 'Global Markets' },
+  { key: 'syn_trade_finance_pct', label: 'Trade Finance' },
   { key: 'lending_ib_pct', label: 'Lending / IB' },
 ]
 
