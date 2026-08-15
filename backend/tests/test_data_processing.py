@@ -303,6 +303,73 @@ class DataProcessorTests(unittest.TestCase):
         gemini_call.assert_not_called()
         pd.testing.assert_frame_equal(scored, sens)
 
+    def test_sens_score_decay_uses_days_since_announcement(self):
+        processor = Data_Processor()
+        sens = pd.DataFrame([
+            {
+                "company": "Ten days old",
+                "announcement_date": "2025-01-01",
+                "transactional_banking_opportunity_score": 1.0,
+                "global_markets_opportunity_score": 0.5,
+                "investment_banking_opportunity_score": 0.25,
+            },
+            {
+                "company": "Today",
+                "announcement_date": "2025-01-11",
+                "transactional_banking_opportunity_score": 0.8,
+                "global_markets_opportunity_score": 0.6,
+                "investment_banking_opportunity_score": 0.4,
+            },
+            {
+                "company": "Unknown date",
+                "announcement_date": None,
+                "transactional_banking_opportunity_score": 0.7,
+                "global_markets_opportunity_score": 0.3,
+                "investment_banking_opportunity_score": 0.1,
+            },
+        ], index=[3, 7, 9])
+        original = sens.copy(deep=True)
+
+        decayed = processor.apply_sens_score_decay(
+            sens, half_life_days=10, now="2025-01-11T18:30:00+02:00"
+        )
+
+        self.assertAlmostEqual(
+            decayed.loc[3, "transactional_banking_opportunity_score"],
+            0.5,
+        )
+        self.assertAlmostEqual(
+            decayed.loc[3, "global_markets_opportunity_score"],
+            0.25,
+        )
+        self.assertEqual(
+            decayed.loc[7, "transactional_banking_opportunity_score"], 0.8
+        )
+        self.assertEqual(
+            decayed.loc[9, "transactional_banking_opportunity_score"], 0.7
+        )
+        self.assertEqual(list(decayed.index), [3, 7, 9])
+        self.assertEqual(list(decayed.columns), list(sens.columns))
+        pd.testing.assert_frame_equal(sens, original)
+
+    def test_sens_score_decay_rejects_invalid_parameters(self):
+        processor = Data_Processor()
+        sens = pd.DataFrame({
+            "announcement_date": ["2025-01-01"],
+            "transactional_banking_opportunity_score": [0.5],
+            "global_markets_opportunity_score": [0.5],
+            "investment_banking_opportunity_score": [0.5],
+        })
+
+        with self.assertRaisesRegex(ValueError, "finite positive"):
+            processor.apply_sens_score_decay(sens, 0)
+        with self.assertRaisesRegex(ValueError, "finite positive"):
+            processor.apply_sens_score_decay(sens, -10)
+        with self.assertRaisesRegex(ValueError, "announcement_date"):
+            processor.apply_sens_score_decay(
+                sens.drop(columns=["announcement_date"]), 10
+            )
+
     def test_final_gemini_batch_reconciles_candidates_without_mechanical_merge(self):
         processor = Data_Processor()
         candidates = [

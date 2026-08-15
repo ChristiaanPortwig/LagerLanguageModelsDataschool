@@ -1427,6 +1427,72 @@ class Data_Processor:
             )
         return scored
 
+    def apply_sens_score_decay(
+        self,
+        scored_sens_df: pd.DataFrame,
+        half_life_days: float = 90,
+        *,
+        now=None,
+    ) -> pd.DataFrame:
+        """Apply exponential time decay to the SENS opportunity scores.
+
+        For each score, the returned value is ``score * 2 ** (-age_in_days /
+        half_life_days)``. This means a score is halved after one half-life,
+        quartered after two, and so on. Announcement dates and ``now`` are
+        compared as UTC calendar dates. Future announcements have an age of
+        zero, while rows with missing or invalid announcement dates retain
+        their original scores. The complete dataframe is returned as a copy;
+        the input is not modified.
+
+        ``half_life_days`` must be a finite positive number. ``now`` defaults
+        to the current date and can be supplied for reproducible calculations.
+        """
+        if not isinstance(scored_sens_df, pd.DataFrame):
+            raise TypeError("scored_sens_df must be a pandas DataFrame")
+        if (
+            isinstance(half_life_days, bool)
+            or not isinstance(half_life_days, Number)
+            or not math.isfinite(float(half_life_days))
+            or half_life_days <= 0
+        ):
+            raise ValueError("half_life_days must be a finite positive number")
+        if "announcement_date" not in scored_sens_df.columns:
+            raise ValueError("scored_sens_df must contain an announcement_date column")
+
+        missing_score_columns = [
+            column
+            for column in self.SENS_OPPORTUNITY_SCORE_COLUMNS
+            if column not in scored_sens_df.columns
+        ]
+        if missing_score_columns:
+            raise ValueError(
+                "scored_sens_df is missing opportunity score columns: "
+                + ", ".join(missing_score_columns)
+            )
+
+        as_of_date = (
+            pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+        )
+        if pd.isna(as_of_date):
+            raise ValueError("now must be a valid date or datetime")
+        if as_of_date.tzinfo is not None:
+            as_of_date = as_of_date.tz_convert("UTC").tz_localize(None)
+        as_of_date = as_of_date.normalize()
+
+        decayed = scored_sens_df.copy(deep=True)
+        announcement_dates = pd.to_datetime(
+            decayed["announcement_date"], errors="coerce", utc=True
+        ).dt.tz_localize(None).dt.normalize()
+        age_in_days = (as_of_date - announcement_dates).dt.days.clip(lower=0)
+        decay_factors = 2 ** (-age_in_days / float(half_life_days))
+        has_date = announcement_dates.notna()
+
+        for column in self.SENS_OPPORTUNITY_SCORE_COLUMNS:
+            scores = pd.to_numeric(decayed[column], errors="coerce")
+            decayed[column] = scores.where(~has_date, scores * decay_factors)
+
+        return decayed
+
     @staticmethod
     def _bounded_opportunity_score(value) -> float | None:
         if isinstance(value, bool) or not isinstance(value, Number):

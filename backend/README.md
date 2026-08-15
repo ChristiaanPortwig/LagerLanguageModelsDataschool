@@ -59,6 +59,7 @@ All dataframe-returning methods use `(external_df, sens_df)` order.
 | `extract_external_data_from_pdfs(source_dir=..., return_failures=False)` | Low-level extraction that processes every PDF supplied; it bypasses incremental selection and can return failed document keywords by company. |
 | `get_failed_scrape_keywords()` | Returns the most recent PDF extraction failures as `{company: [document keywords]}`. |
 | `score_sens_opportunities(sens_df)` | Fills missing transactional-banking, global-markets, and investment-banking opportunity scores (0–1) with Gemini. |
+| `apply_sens_score_decay(scored_sens_df, half_life_days, now=None)` | Applies half-life decay to all three SENS opportunity scores while retaining the full dataframe. |
 | `validate_external_data(external_df, sens_df)` | Fills missing values and replaces mismatches using yfinance. |
 | `standardize_data(external_df, sens_df, fx_as_of_date=None)` | Converts monetary values to base-unit ZAR and adds FX audit columns. |
 | `standardize_external_data(...)` | Compatibility alias for `standardize_data`. |

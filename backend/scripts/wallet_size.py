@@ -11,8 +11,6 @@ from typing import Any, NamedTuple
 
 import pandas as pd
 
-from scripts.data_processing import Data_Processor
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -153,13 +151,6 @@ def calculate_total_wallet_size(
     unavailable estimates. When both return flags are true, the missing keyword
     mapping is returned as a third value.
     """
-    my_processor = Data_Processor()
-    standard_ext_data, standard_sens_data = my_processor.standardize_data(company_df, corporate_events_df)
-    new_company_lvl_df, new_sens_df = my_processor.validate_external_data(standard_ext_data, standard_sens_data)
-
-    company_df = new_company_lvl_df
-    corporate_events_df = new_sens_df
-
     rows = _prepare_company_rows(company_df)
     if corporate_events_df is not None:
         rows = _add_event_values(rows, corporate_events_df)
