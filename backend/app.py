@@ -121,9 +121,7 @@ def create_client_briefing(client_id: str):
     if client is None:
         raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found")
 
-    # Stub: proves the prompt builder is wired in correctly. Once Christiaan's
-    # Gemini call is ready, this will send the built prompt to the model and
-    # return its response instead of echoing the prompt back.
+    # Sends the built prompt to Gemini and returns its generated response.
     prompt = build_briefing_prompt(client)
 
     client = Gemini_Client()
