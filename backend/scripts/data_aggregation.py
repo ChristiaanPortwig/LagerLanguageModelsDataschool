@@ -30,6 +30,8 @@ import pandas as pd
 import json
 from pathlib import Path
 
+from scripts.wallet_size import calculate_total_wallet_size
+
 
 def find_cross_ledger_overlaps(
     cross_border_df: pd.DataFrame, 
@@ -220,6 +222,8 @@ def convert_client_table_to_dashboard_schema(client_table: pd.DataFrame) -> list
         list of dicts: Clean records matching the dashboard frontend schema.
     """
     formatted_records = []
+
+    print("COLOUMSN:=========================\n\n\n",client_table.columns)
     
     for _, row in client_table.iterrows():
         observed_total = float(row['syn_bank_observed_total_zar'])
@@ -233,7 +237,7 @@ def convert_client_table_to_dashboard_schema(client_table: pd.DataFrame) -> list
             txn_pct = cb_pct = tf_pct = ib_pct = 0.0
 
         # (If you have an external total addressable wallet column, swap it in here)
-        estimated_total_wallet = 1 #TODO: get from christiaan
+        estimated_total_wallet = row['total']
         syn_bank_share = round((observed_total / estimated_total_wallet) * 100, 2) if estimated_total_wallet > 0 else 0.0
         wallet_gap = max(0.0, estimated_total_wallet - observed_total)
         
@@ -241,13 +245,23 @@ def convert_client_table_to_dashboard_schema(client_table: pd.DataFrame) -> list
             "entity_id": str(row['entity_id']),
             "entity_name": str(row['entity_name']),
             "sector": str(row['sector']),
-            "txn_banking_pct": txn_pct,
-            "cross_border_pct": cb_pct,
-            "trade_finance_pct": tf_pct,
+
+            "syn_txn_banking_pct": txn_pct,
+            "syn_global_markets_pct": cb_pct,
+            "syn_trade_finance_pct": tf_pct,
+
+            "syn_txt_banking_total_zar": row['txn_banking_total_zar'],
+            "syn_global_markets_total_zar":row['cross_border_total_zar'],
+            "syn_trade_finace_total_zar":row['trade_finance_total_zar'],
+
             "lending_ib_pct": ib_pct,
             "estimated_total_wallet_zar": float(estimated_total_wallet),
             "syn_bank_share_pct": syn_bank_share,
             "wallet_gap_zar": float(wallet_gap),
+
+            "company_transactional_banking_total_zar": float(row['transactional_banking']),
+            "company_global_markets_total_zar":float(row['global_markets']),
+            "company_investment_banking_total_zar":float(row['investment_banking']),
             
             # TODO: figure out these
             "refinancing_flag": False,
@@ -274,9 +288,13 @@ def save_dashboard_clients_to_json(client_records, output_path="../../data/clien
     print(f"Successfully saved {len(client_records)} client records to {target_file.resolve()}")
 
 def reload_client_data():
-    cross_border_payments = pd.read_csv("../../data/cross_border_payments.csv")
-    trade_finance = pd.read_csv("../../data/trade_finance.csv")
-    transactional_banking = pd.read_csv("../../data/transactional_banking.csv")
+    cross_border_payments = pd.read_csv("../data/cross_border_payments.csv")
+    trade_finance = pd.read_csv("../data/trade_finance.csv")
+    transactional_banking = pd.read_csv("../data/transactional_banking.csv")
+
+    company = pd.read_csv("../data/company_lvl_scraped_new.csv")
+    sens = pd.read_csv("../data/sens_scraped_new.csv")
+    
     print("[data-agg] Loaded csv")
     # Currency casing fix (found during EDA: 'ZAR' vs 'zar')
     transactional_banking['currency'] = transactional_banking['currency'].str.upper()
@@ -294,6 +312,18 @@ def reload_client_data():
     )
     print("[data-agg] final client table")
     
+    df = calculate_total_wallet_size(company_df=company, corporate_events_df=sens)
+
+    print("[data-agg] total wallet")
+
+    final_client_table = final_client_table.merge(
+        df, 
+        left_on='entity_name', 
+        right_on='company', 
+        how='left'
+    )
+    print("[data-agg] Merged external wallet data")
+
     formatted = convert_client_table_to_dashboard_schema(final_client_table)
     print("[data-agg] formatted")
     save_dashboard_clients_to_json(formatted)

@@ -10,6 +10,8 @@ from typing import NamedTuple
 
 import pandas as pd
 
+from scripts.data_processing import Data_Processor
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -138,6 +140,13 @@ def calculate_total_wallet_size(
     has a defensible Tier A, B, or C estimate. ``total`` is null unless all
     three pillars can be estimated.
     """
+    my_processor = Data_Processor()
+    standard_ext_data, standard_sens_data = my_processor.standardize_data(company_df, corporate_events_df)
+    new_company_lvl_df, new_sens_df = my_processor.validate_external_data(standard_ext_data, standard_sens_data)
+
+    company_df = new_company_lvl_df
+    corporate_events_df = new_sens_df
+
     rows = _prepare_company_rows(company_df)
     if corporate_events_df is not None:
         rows = _add_event_values(rows, corporate_events_df)
@@ -595,3 +604,8 @@ def _has_value(value) -> bool:
         return not bool(missing)
     except ValueError:
         return True
+
+if __name__ == '__main__':
+    company = pd.read_csv("../../data/company_lvl_scraped_new.csv")
+    sens = pd.read_csv("../../data/sens_scraped_new.csv")
+    df = calculate_total_wallet_size(company_df=company, corporate_events_df=sens)

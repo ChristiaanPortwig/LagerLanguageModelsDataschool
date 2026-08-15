@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 from google import genai
-from ..config.gemini_structured_schemas import (CompanyLevelExtDataResponse, SENSEventsResponse)
+from config.gemini_structured_schemas import (CompanyLevelExtDataResponse, SENSEventsResponse)
 import base64
 from pathlib import Path
 import logging

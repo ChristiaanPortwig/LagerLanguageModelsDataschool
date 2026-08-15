@@ -16,12 +16,12 @@ import pandas as pd
 import yfinance as yf
 from pypdf import PdfWriter
 
-from ..config.gemini_structured_schemas import (
+from config.gemini_structured_schemas import (
     CompanyLevelExtDataCombinationResponse,
     CompanyLevelExtDataResponse,
     SENSEventsResponse,
 )
-from ..config.prompts import (
+from config.prompts import (
     COMPANY_LEVEL_COMBINATION_PROMPT,
     COMPANY_LEVEL_PROMPT,
     SENS_PROMPT,
