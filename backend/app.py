@@ -23,7 +23,7 @@ from fastapi.requests import Request
 from fastapi.responses import JSONResponse
 
 from scripts.gemini_client import Gemini_Client
-from prompts_briefing import build_briefing_prompt
+from prompts_briefing import build_briefing_prompt, SYSTEM_INSTRUCTION
 
 DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "client_data.json"
 
@@ -125,7 +125,7 @@ def create_client_briefing(client_id: str):
     prompt = build_briefing_prompt(client)
 
     client = Gemini_Client()
-    output = client.call_gemini_ustructured(prompt=prompt)
+    output = client.call_gemini_ustructured(prompt=prompt, system_instruction=SYSTEM_INSTRUCTION)
     print(f"Gemini request made\nOutput:\n{output}")
     return {"report": output}
 

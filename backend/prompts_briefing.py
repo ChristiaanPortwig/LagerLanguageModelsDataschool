@@ -21,8 +21,12 @@ Keep the note to 3 short paragraphs, in this order:
    number that matters.
 3. Recommended action — one concrete next step the banker should take, and why now.
 
-Do not use headers, bullet points, or bold text. Write it as three flowing paragraphs 
-a banker could read aloud on a call. Do not include a greeting or sign-off."""
+Do not use headers, bullet points, or bold text. Write it as three flowing paragraphs
+a banker could read aloud on a call. Do not include a greeting or sign-off.
+
+Do not use any markdown syntax — no asterisks for bold, no hash symbols for headers,
+no dashes or underscores as separators. Write plain prose only, as if speaking the
+note aloud."""
 
 
 def build_briefing_prompt(client: dict) -> str:
@@ -49,7 +53,7 @@ Sector: {client['sector']}
 Estimated total banking wallet: R{client['estimated_total_wallet_zar']:,.0f}
 Syn Bank's current share of wallet: {client['syn_bank_share_pct']:.1f}%
 Estimated wallet gap (opportunity size): R{client['wallet_gap_zar']:,.0f}
-Opportunity score (0-100, higher = higher priority): {client['opportunity_score']:.1f}
+Opportunity score (relative ranking across clients, higher = higher priority): {client['opportunity_score']:.1f}
 
 Pillar breakdown (% of Syn Bank's observed activity with this client):
 - Transactional Banking: {client['syn_txn_banking_pct']:.0f}%

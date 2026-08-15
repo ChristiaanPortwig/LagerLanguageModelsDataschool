@@ -27,17 +27,25 @@ class Gemini_Client:
     client = genai.Client(api_key=GEMINI_API_KEY)
 
     # TODO: Perhaps model can be changed to an enum
-    def call_gemini_ustructured(self, prompt, model = "gemini-3.5-flash-lite"):
+    def call_gemini_ustructured(self, prompt, system_instruction: str | None = None,
+                                 model = "gemini-3.5-flash-lite"):
         """
         Make a call to gemini, not expecting structured output.
+
+        Params:
+            system_instruction: Optional system-level instructions (tone, format,
+            constraints) sent alongside the prompt. Without this, callers passing
+            a SYSTEM_INSTRUCTION constant have no way to actually get it to the
+            model — it must be threaded through explicitly.
 
         Return:
             Output text
         """
-        interaction = self.client.interactions.create(
-            model = model,
-            input = prompt
-        )
+        create_kwargs = {"model": model, "input": prompt}
+        if system_instruction:
+            create_kwargs["system_instruction"] = system_instruction
+
+        interaction = self.client.interactions.create(**create_kwargs)
 
         return interaction.output_text
 
