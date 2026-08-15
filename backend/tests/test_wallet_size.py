@@ -1,8 +1,12 @@
+import json
 import unittest
 
 import pandas as pd
 
-from backend.scripts.wallet_size import calculate_total_wallet_size
+from backend.scripts.wallet_size import (
+    calculate_total_wallet_size,
+    missing_wallet_data_keywords,
+)
 
 
 class WalletSizeTests(unittest.TestCase):
@@ -75,6 +79,93 @@ class WalletSizeTests(unittest.TestCase):
         self.assertIn("missing cost_of_sales, employee_expenses", message)
         self.assertIn("global_markets confidence is can't estimate", message)
         self.assertIn("interest_rate_derivative_notional", message)
+
+    def test_returns_missing_data_keywords_by_company(self):
+        companies = pd.DataFrame([{
+            "company": "Sparse Ltd",
+            "reporting_unit": "units",
+            "revenue": 100,
+        }])
+
+        with self.assertLogs("backend.scripts.wallet_size", level="WARNING"):
+            result, missing = calculate_total_wallet_size(
+                companies, return_missing_data=True
+            )
+
+        self.assertIsInstance(result, pd.DataFrame)
+        self.assertEqual(result.attrs["missing_data_keywords"], missing)
+        self.assertEqual(missing_wallet_data_keywords(companies), missing)
+        self.assertEqual(list(missing), ["Sparse Ltd"])
+        self.assertIn("cost_of_sales", missing["Sparse Ltd"])
+        self.assertIn("fx_derivative_notional", missing["Sparse Ltd"])
+        self.assertIn("bank_loan_debt", missing["Sparse Ltd"])
+
+    def test_returns_json_serializable_formulas_and_missing_row_templates(self):
+        companies = pd.DataFrame([{
+            "company": "Sparse Ltd",
+            "report_date": pd.Timestamp("2025-12-31"),
+            "reporting_unit": "units",
+            "revenue": 100,
+        }])
+
+        with self.assertLogs("backend.scripts.wallet_size", level="WARNING"):
+            result, details = calculate_total_wallet_size(
+                companies, return_calculation_details=True
+            )
+
+        json.dumps(details, allow_nan=False)
+        self.assertIs(result.attrs["calculation_details"], details)
+        sparse_formulas = details["formulas"]["Sparse Ltd"]
+        self.assertEqual(
+            sparse_formulas["products"]["payments"],
+            {
+                "tier": "C",
+                "formula": "revenue",
+                "inputs": {"revenue": 100.0},
+                "value": 100.0,
+            },
+        )
+        self.assertEqual(
+            sparse_formulas["pillars"]["transactional_banking"]["formula"],
+            "payments + collections",
+        )
+        self.assertIsNone(sparse_formulas["total"]["value"])
+        self.assertEqual(len(details["missing_rows"]), 1)
+        missing_row = details["missing_rows"][0]
+        self.assertEqual(missing_row["company"], "Sparse Ltd")
+        self.assertEqual(missing_row["report_date"], "2025-12-31T00:00:00")
+        self.assertEqual(missing_row["revenue"], 100)
+        self.assertIsNone(missing_row["cost_of_sales"])
+        self.assertIsNone(missing_row["bank_loan_debt"])
+        self.assertNotIn("_event_dcm_value", missing_row)
+
+    def test_missing_rows_include_unavailable_products_in_high_confidence_pillar(self):
+        companies = pd.DataFrame([{
+            "company": "Mostly Direct Ltd",
+            "reporting_unit": "units",
+            "cost_of_sales": 40,
+            "employee_expenses": 10,
+            "tax_paid": 2,
+            "dividends_paid": 3,
+            "collections_value": 100,
+            "average_cash_balance": 20,
+            "trade_exposure_value": 30,
+        }])
+
+        with self.assertLogs("backend.scripts.wallet_size", level="WARNING"):
+            result, details = calculate_total_wallet_size(
+                companies, return_calculation_details=True
+            )
+
+        self.assertEqual(
+            result.loc[
+                "Mostly Direct Ltd", "transactional_banking_confidence"
+            ],
+            "high",
+        )
+        self.assertIsNone(
+            details["missing_rows"][0]["guarantees_outstanding"]
+        )
 
     def test_optional_events_supply_direct_investment_banking_values(self):
         companies = pd.DataFrame(

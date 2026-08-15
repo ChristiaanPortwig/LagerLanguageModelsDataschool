@@ -36,6 +36,22 @@ written to `data/json/` (`current_external_data.json`,
 returns `(external_df, sens_df, wallet_size_df)` and accepts existing frames as
 `current_sens_data` and `current_external_data`.
 
+For an auditable wallet estimate, request the calculation details directly:
+
+```python
+wallet_size_df, calculation_json = calculate_total_wallet_size(
+    company_df,
+    corporate_events_df,
+    return_calculation_details=True,
+)
+```
+
+`calculation_json["formulas"]` records each selected product formula, its tier,
+inputs, and the pillar/total rollups. `calculation_json["missing_rows"]`
+contains JSON-safe company-row templates with improvable fields set to `null`;
+populate those fields and merge the rows back into `company_df` for a more
+accurate recalculation.
+
 `process_data` extracts base-unit values from PDFs, validates available company
 values with yfinance, and converts dated monetary values to ZAR. It now reads
 and updates the checkpoints and document fingerprints in `data/json/`, so only

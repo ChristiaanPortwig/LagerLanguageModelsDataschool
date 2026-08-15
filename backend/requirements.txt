@@ -1,2 +1,11 @@
+beautifulsoup4>=4.12
+crawl4ai>=0.7
 fastapi>=0.110
+google-genai>=1.0
+pandas>=2.0
+pydantic>=2.0
+pypdf>=5.0
+python-dotenv>=1.0
+requests>=2.31
 uvicorn[standard]>=0.29
+yfinance>=0.2

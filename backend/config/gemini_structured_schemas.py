@@ -607,6 +607,48 @@ class SENSEventsResponse(BaseModel):
     )
 
 
+class SENSOpportunityScore(BaseModel):
+    """Opportunity ratings for one input row in a SENS dataframe."""
+
+    row_id: int = Field(
+        ge=0,
+        description="Stable zero-based row identifier supplied in the prompt.",
+    )
+    transactional_banking_opportunity_score: float = Field(
+        ge=0,
+        le=1,
+        description=(
+            "Opportunity score from 0 (no supported opportunity) to 1 "
+            "(exceptionally strong opportunity) for transactional banking."
+        ),
+    )
+    global_markets_opportunity_score: float = Field(
+        ge=0,
+        le=1,
+        description=(
+            "Opportunity score from 0 (no supported opportunity) to 1 "
+            "(exceptionally strong opportunity) for global markets."
+        ),
+    )
+    investment_banking_opportunity_score: float = Field(
+        ge=0,
+        le=1,
+        description=(
+            "Opportunity score from 0 (no supported opportunity) to 1 "
+            "(exceptionally strong opportunity) for investment banking."
+        ),
+    )
+
+
+class SENSOpportunityScoresResponse(BaseModel):
+    """Gemini opportunity ratings for SENS rows without complete scores."""
+
+    scores: List[SENSOpportunityScore] = Field(
+        default_factory=list,
+        description="Exactly one set of opportunity scores per supplied SENS row.",
+    )
+
+
 class DocumentFilenameValidation(BaseModel):
     """Gemini's assessment of one downloaded non-SENS document."""
 
