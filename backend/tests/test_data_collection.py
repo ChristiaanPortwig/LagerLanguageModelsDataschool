@@ -74,6 +74,21 @@ class DataCollectorTimeoutTests(unittest.TestCase):
 
         self.assertEqual(documents, [])
 
+    def test_collect_data_can_scrape_only_sens(self):
+        collector = DataCollector()
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            collector, "get_sens_data", return_value=[{"id": 1}]
+        ) as sens_scrape, patch.object(
+            collector, "scrape_and_save_reports"
+        ) as all_scrape:
+            result = collector.collect_data(
+                scrape_scope="sens", save_location=directory
+            )
+
+        self.assertEqual(result, [{"id": 1}])
+        sens_scrape.assert_called_once_with(base_dir=Path(directory))
+        all_scrape.assert_not_called()
+
     def test_javascript_report_title_is_paired_with_its_file(self):
         collector = DataCollector()
         body = """
@@ -257,6 +272,7 @@ class FilenameValidationTests(unittest.TestCase):
             for item in result
         ))
         gemini_validation.assert_called_once_with(directory)
+
 
 
 if __name__ == "__main__":

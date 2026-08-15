@@ -1,7 +1,10 @@
 import ast
+import hashlib
+import json
 import logging
 import math
 import re
+import shutil
 import time
 import unicodedata
 import warnings
@@ -438,9 +441,366 @@ class Data_Processor:
     RETRY_DELAY_SECONDS = 60
     MAX_ALLOWED_FAILURES = 2
     JSE_NAMES = JSE_NAMES
+    DEFAULT_DOWNLOAD_DIR = (
+        Path(__file__).resolve().parents[2] / "data" / "downloads"
+    )
+    DEFAULT_JSON_DIR = Path(__file__).resolve().parents[2] / "data" / "json"
+    PROCESSED_DOCUMENTS_FILE = "processed_documents.json"
+    EXTERNAL_DATA_FILE = "current_external_data.json"
+    SENS_DATA_FILE = "current_sens_data.json"
 
     def __init__(self):
         self.gemini_client = Gemini_Client()
+        self.last_extraction_status = {
+            "external_documents": set(),
+            "sens_documents": set(),
+        }
+
+    def prepare_incremental_data(
+        self,
+        current_sens_data: pd.DataFrame | None = None,
+        current_external_data: pd.DataFrame | None = None,
+        *,
+        source_dir=None,
+        json_location=None,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Load/checkpoint current frames and initialise processing state.
+
+        Call this before scraping. If the processed-document manifest does not
+        exist, PDFs already on disk are marked processed only for dataframe
+        kinds explicitly supplied by the caller or restored from a checkpoint.
+        With no current data, existing PDFs remain unprocessed for a first run.
+
+        Returns ``(external_df, sens_df)``.
+        """
+        downloads_dir, json_dir = self._incremental_paths(
+            source_dir, json_location
+        )
+        external_path = json_dir / self.EXTERNAL_DATA_FILE
+        sens_path = json_dir / self.SENS_DATA_FILE
+        has_current_external = (
+            current_external_data is not None or external_path.exists()
+        )
+        has_current_sens = current_sens_data is not None or sens_path.exists()
+
+        external_df = self._current_dataframe(
+            current_external_data, external_path, "current_external_data"
+        )
+        sens_df = self._current_dataframe(
+            current_sens_data, sens_path, "current_sens_data"
+        )
+        self.save_current_data(external_df, sens_df, json_location=json_dir)
+
+        state_path = json_dir / self.PROCESSED_DOCUMENTS_FILE
+        if not state_path.exists() and (has_current_external or has_current_sens):
+            current_documents = self._document_fingerprints(downloads_dir)
+            processed_documents = {
+                relative_path: fingerprint
+                for relative_path, fingerprint in current_documents.items()
+                if (
+                    fingerprint["kind"] == "external" and has_current_external
+                )
+                or (fingerprint["kind"] == "sens" and has_current_sens)
+            }
+            self._write_processed_documents(processed_documents, state_path)
+        return external_df, sens_df
+
+    def process_new_data(
+        self,
+        current_sens_data: pd.DataFrame | None = None,
+        current_external_data: pd.DataFrame | None = None,
+        *,
+        source_dir=None,
+        json_location=None,
+        process_scope="all",
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Extract only documents not recorded in the JSON manifest.
+
+        A changed non-SENS report reprocesses all reports for that company and
+        replaces its current company row. Only changed SENS PDFs are processed
+        and appended. Processing state and updated raw frames are written to
+        the JSON directory before this method returns.
+        """
+        if process_scope not in {"all", "sens"}:
+            raise ValueError("process_scope must be either 'all' or 'sens'")
+
+        downloads_dir, json_dir = self._incremental_paths(
+            source_dir, json_location
+        )
+        external_path = json_dir / self.EXTERNAL_DATA_FILE
+        sens_path = json_dir / self.SENS_DATA_FILE
+        current_external_data = self._current_dataframe(
+            current_external_data, external_path, "current_external_data"
+        )
+        current_sens_data = self._current_dataframe(
+            current_sens_data, sens_path, "current_sens_data"
+        )
+
+        state_path = json_dir / self.PROCESSED_DOCUMENTS_FILE
+        processed_documents = self._load_processed_documents(state_path)
+        available_documents = self._document_fingerprints(downloads_dir)
+        changed_paths = {
+            relative_path
+            for relative_path, fingerprint in available_documents.items()
+            if processed_documents.get(relative_path) != fingerprint
+        }
+        if process_scope == "sens":
+            changed_paths = {
+                path
+                for path in changed_paths
+                if self._document_kind(path) == "sens"
+            }
+
+        changed_sens = {
+            path
+            for path in changed_paths
+            if self._document_kind(path) == "sens"
+        }
+        changed_external = changed_paths - changed_sens
+        changed_companies = {
+            Path(path).parts[0] for path in changed_external
+        }
+        updated_external = current_external_data.copy(deep=True)
+        updated_sens = current_sens_data.copy(deep=True)
+        processed_now = set()
+
+        if changed_companies:
+            with TemporaryDirectory(prefix="external_updates_") as temp_dir:
+                batch_dir = Path(temp_dir)
+                company_documents = set()
+                for relative_path in available_documents:
+                    path = Path(relative_path)
+                    if (
+                        self._document_kind(relative_path) == "external"
+                        and path.parts[0] in changed_companies
+                    ):
+                        company_documents.add(relative_path)
+                        self._copy_for_processing(
+                            downloads_dir / path, batch_dir / path
+                        )
+                extracted_external, _ = self.extract_external_data_from_pdfs(
+                    batch_dir
+                )
+                successful_external_paths = self._successful_batch_paths(
+                    "external_documents", batch_dir, company_documents
+                )
+
+            successful_companies = self._companies_in_dataframe(
+                extracted_external
+            )
+            if successful_companies:
+                updated_external = self._replace_company_rows(
+                    updated_external,
+                    extracted_external,
+                    successful_companies,
+                )
+                processed_now.update(
+                    relative_path
+                    for relative_path in successful_external_paths
+                    if self._canonical_company_name(
+                        Path(relative_path).parts[0]
+                    ) in successful_companies
+                )
+            else:
+                LOGGER.warning(
+                    "No company rows were extracted; changed report files "
+                    "will be retried on the next run"
+                )
+
+        if changed_sens:
+            with TemporaryDirectory(prefix="sens_updates_") as temp_dir:
+                batch_dir = Path(temp_dir)
+                for relative_path in changed_sens:
+                    path = Path(relative_path)
+                    self._copy_for_processing(
+                        downloads_dir / path, batch_dir / path
+                    )
+                _, extracted_sens = self.extract_external_data_from_pdfs(
+                    batch_dir
+                )
+                successful_sens_paths = self._successful_batch_paths(
+                    "sens_documents", batch_dir, changed_sens
+                )
+            updated_sens = self._append_unique_rows(updated_sens, extracted_sens)
+            # A SENS announcement can validly contain no wallet-relevant event.
+            processed_now.update(successful_sens_paths)
+
+        for relative_path in processed_now:
+            processed_documents[relative_path] = available_documents[relative_path]
+        self.save_current_data(
+            updated_external, updated_sens, json_location=json_dir
+        )
+        self._write_processed_documents(processed_documents, state_path)
+        return updated_external, updated_sens
+
+    def save_current_data(
+        self,
+        external_data: pd.DataFrame,
+        sens_data: pd.DataFrame,
+        json_location=None,
+    ) -> None:
+        """Persist processed dataframes without changing document state."""
+        if not isinstance(external_data, pd.DataFrame):
+            raise TypeError("external_data must be a pandas DataFrame")
+        if not isinstance(sens_data, pd.DataFrame):
+            raise TypeError("sens_data must be a pandas DataFrame")
+        json_dir = Path(json_location or self.DEFAULT_JSON_DIR)
+        json_dir.mkdir(parents=True, exist_ok=True)
+        self._write_dataframe(external_data, json_dir / self.EXTERNAL_DATA_FILE)
+        self._write_dataframe(sens_data, json_dir / self.SENS_DATA_FILE)
+
+    def _incremental_paths(self, source_dir, json_location):
+        downloads_dir = Path(source_dir or self.DEFAULT_DOWNLOAD_DIR)
+        json_dir = Path(json_location or self.DEFAULT_JSON_DIR)
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        json_dir.mkdir(parents=True, exist_ok=True)
+        return downloads_dir, json_dir
+
+    @staticmethod
+    def _document_kind(relative_path: str) -> str:
+        return (
+            "sens"
+            if "SENS" in Path(relative_path).parts[1:-1]
+            else "external"
+        )
+
+    @classmethod
+    def _document_fingerprints(cls, downloads_dir: Path) -> dict[str, dict]:
+        fingerprints = {}
+        if not downloads_dir.exists():
+            return fingerprints
+        for path in sorted(downloads_dir.rglob("*.pdf")):
+            if not path.is_file():
+                continue
+            digest = hashlib.sha256()
+            with path.open("rb") as pdf_file:
+                for chunk in iter(lambda: pdf_file.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            relative_path = path.relative_to(downloads_dir).as_posix()
+            fingerprints[relative_path] = {
+                "kind": cls._document_kind(relative_path),
+                "sha256": digest.hexdigest(),
+                "size": path.stat().st_size,
+            }
+        return fingerprints
+
+    @staticmethod
+    def _load_processed_documents(path: Path) -> dict[str, dict]:
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            LOGGER.warning("Could not read processing state %s: %s", path, error)
+            return {}
+        documents = (
+            payload.get("documents", {}) if isinstance(payload, dict) else {}
+        )
+        return documents if isinstance(documents, dict) else {}
+
+    @staticmethod
+    def _write_processed_documents(documents: dict, path: Path) -> None:
+        payload = {"version": 1, "documents": dict(sorted(documents.items()))}
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    @staticmethod
+    def _read_dataframe(path: Path) -> pd.DataFrame:
+        try:
+            records = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            LOGGER.warning("Could not read dataframe checkpoint %s: %s", path, error)
+            return pd.DataFrame()
+        if not isinstance(records, list):
+            LOGGER.warning("Dataframe checkpoint %s is not a JSON list", path)
+            return pd.DataFrame()
+        return pd.DataFrame(records)
+
+    @classmethod
+    def _current_dataframe(cls, dataframe, path: Path, parameter: str):
+        if dataframe is not None:
+            if not isinstance(dataframe, pd.DataFrame):
+                raise TypeError(f"{parameter} must be a pandas DataFrame")
+            return dataframe.copy(deep=True)
+        if path.exists():
+            return cls._read_dataframe(path)
+        return pd.DataFrame()
+
+    @staticmethod
+    def _write_dataframe(dataframe: pd.DataFrame, path: Path) -> None:
+        records = json.loads(
+            dataframe.to_json(orient="records", date_format="iso")
+        )
+        path.write_text(
+            json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    @staticmethod
+    def _copy_for_processing(source: Path, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+    def _successful_batch_paths(
+        self, status_key: str, batch_dir: Path, candidates: set[str]
+    ) -> set[str]:
+        successful = set()
+        for path in self.last_extraction_status.get(status_key, set()):
+            try:
+                relative_path = (
+                    Path(path)
+                    .resolve()
+                    .relative_to(batch_dir.resolve())
+                    .as_posix()
+                )
+            except (OSError, ValueError):
+                LOGGER.warning(
+                    "Ignoring processing status path outside batch: %s", path
+                )
+                continue
+            if relative_path in candidates:
+                successful.add(relative_path)
+        return successful
+
+    @classmethod
+    def _companies_in_dataframe(cls, dataframe: pd.DataFrame) -> set[str]:
+        if dataframe.empty or "company" not in dataframe.columns:
+            return set()
+        return {
+            cls._canonical_company_name(company)
+            for company in dataframe["company"]
+            if cls._has_value(company)
+        }
+
+    @classmethod
+    def _replace_company_rows(
+        cls,
+        current: pd.DataFrame,
+        replacements: pd.DataFrame,
+        companies: set[str],
+    ) -> pd.DataFrame:
+        if current.empty or "company" not in current.columns:
+            retained = current.iloc[0:0]
+        else:
+            retained = current.loc[
+                ~current["company"].map(cls._canonical_company_name).isin(companies)
+            ]
+        return pd.concat([retained, replacements], ignore_index=True, sort=False)
+
+    @staticmethod
+    def _append_unique_rows(
+        current: pd.DataFrame, additions: pd.DataFrame
+    ) -> pd.DataFrame:
+        if additions.empty:
+            return current.copy(deep=True)
+        combined = pd.concat([current, additions], ignore_index=True, sort=False)
+        keys = combined.apply(
+            lambda row: pd.DataFrame([row]).to_json(
+                orient="records", date_format="iso"
+            ),
+            axis=1,
+        )
+        return combined.loc[~keys.duplicated(keep="first")].reset_index(drop=True)
 
     def _call_gemini_with_retry(self, schema, prompt, pdf_source):
         """Skip a Gemini input after it fails more than twice."""
@@ -758,6 +1118,10 @@ class Data_Processor:
             (curr_company_lvl_df, cur_sens_df)
         """
 
+        self.last_extraction_status = {
+            "external_documents": set(),
+            "sens_documents": set(),
+        }
         company_dirs = sorted(
             path for path in Path(source_dir).iterdir() if path.is_dir()
         )
@@ -775,6 +1139,9 @@ class Data_Processor:
                     document_path,
                 )
                 if curr_company_lvl_json is not None:
+                    self.last_extraction_status["external_documents"].add(
+                        str(document_path.resolve())
+                    )
                     for record in curr_company_lvl_json.get("records", []):
                         normalised_record = self._normalise_company_record(
                             record, canonical_company
@@ -809,6 +1176,9 @@ class Data_Processor:
                     merged_sens_path,
                 )
                 if curr_sens_json is not None:
+                    self.last_extraction_status["sens_documents"].update(
+                        str(path.resolve()) for path in sens_paths
+                    )
                     sens_records.extend(
                         self._normalise_sens_record(record, canonical_company)
                         for record in curr_sens_json.get("events", [])
@@ -1773,12 +2143,29 @@ class Data_Processor:
             external_df, sens_df, fx_as_of_date=fx_as_of_date
         )
 
-    def process_data(self, source_dir=None, fx_as_of_date=None):
-        """Run extraction, yfinance validation, and ZAR conversion."""
-        if source_dir is None:
-            external_df, sens_df = self.extract_external_data_from_pdfs()
-        else:
-            external_df, sens_df = self.extract_external_data_from_pdfs(source_dir)
+    def process_data(
+        self,
+        source_dir=None,
+        fx_as_of_date=None,
+        current_sens_data=None,
+        current_external_data=None,
+        json_location=None,
+        process_scope="all",
+    ):
+        """Incrementally extract, fill, and standardize downloaded data."""
+        external_df, sens_df = self.prepare_incremental_data(
+            current_sens_data=current_sens_data,
+            current_external_data=current_external_data,
+            source_dir=source_dir,
+            json_location=json_location,
+        )
+        external_df, sens_df = self.process_new_data(
+            current_sens_data=sens_df,
+            current_external_data=external_df,
+            source_dir=source_dir,
+            json_location=json_location,
+            process_scope=process_scope,
+        )
         validated_external, validated_sens = self.validate_external_data(
             external_df, sens_df
         )
@@ -1786,5 +2173,10 @@ class Data_Processor:
             validated_external,
             validated_sens,
             fx_as_of_date=fx_as_of_date,
+        )
+        self.save_current_data(
+            standardized_external,
+            standardized_sens,
+            json_location=json_location,
         )
         return standardized_external, standardized_sens

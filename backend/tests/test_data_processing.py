@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -750,6 +751,126 @@ class DataProcessorTests(unittest.TestCase):
         self.assertEqual(row["revenue"], 1_800_000_000)
         self.assertEqual(row["market_capitalisation"], 9_000_000_000)
         self.assertEqual(row["fx_rate_to_zar"], 18)
+
+
+class IncrementalDataProcessorTests(unittest.TestCase):
+    class RecordingProcessor(Data_Processor):
+        def __init__(self):
+            super().__init__()
+            self.batches = []
+
+        def extract_external_data_from_pdfs(self, source_dir):
+            pdf_paths = sorted(Path(source_dir).rglob("*.pdf"))
+            paths = [
+                path.relative_to(source_dir).as_posix()
+                for path in pdf_paths
+            ]
+            self.batches.append(paths)
+            is_sens = any("/SENS/" in f"/{path}" for path in paths)
+            self.last_extraction_status = {
+                "external_documents": (
+                    set() if is_sens else {str(path.resolve()) for path in pdf_paths}
+                ),
+                "sens_documents": (
+                    {str(path.resolve()) for path in pdf_paths} if is_sens else set()
+                ),
+            }
+            if is_sens:
+                return pd.DataFrame(), pd.DataFrame([{
+                    "company": "Glencore",
+                    "announcement_date": "2026-08-15",
+                    "event_type": "bond issue",
+                    "event_value": 20,
+                }])
+            return pd.DataFrame([{
+                "company": "Glencore",
+                "report_date": "2026-06-30",
+                "revenue": 200,
+            }]), pd.DataFrame()
+
+    def test_reports_refresh_by_company_while_only_new_sens_is_processed(self):
+        processor = self.RecordingProcessor()
+        current_external = pd.DataFrame([{
+            "company": "Glencore",
+            "report_date": "2025-12-31",
+            "revenue": 100,
+        }])
+        current_sens = pd.DataFrame([{
+            "company": "Glencore",
+            "announcement_date": "2026-01-01",
+            "event_type": "acquisition",
+            "event_value": 10,
+        }])
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            downloads = root / "downloads"
+            json_dir = root / "json"
+            company = downloads / "Glencore"
+            sens = company / "SENS"
+            sens.mkdir(parents=True)
+            (company / "old-report.pdf").write_bytes(b"old report")
+            (sens / "old-sens.pdf").write_bytes(b"old sens")
+
+            external, sens_data = processor.prepare_incremental_data(
+                current_sens_data=current_sens,
+                current_external_data=current_external,
+                source_dir=downloads,
+                json_location=json_dir,
+            )
+            (company / "new-report.pdf").write_bytes(b"new report")
+            (sens / "new-sens.pdf").write_bytes(b"new sens")
+            external, sens_data = processor.process_new_data(
+                current_sens_data=sens_data,
+                current_external_data=external,
+                source_dir=downloads,
+                json_location=json_dir,
+            )
+
+            self.assertEqual(processor.batches, [
+                ["Glencore/new-report.pdf", "Glencore/old-report.pdf"],
+                ["Glencore/SENS/new-sens.pdf"],
+            ])
+            self.assertEqual(external["revenue"].tolist(), [200])
+            self.assertEqual(sens_data["event_value"].tolist(), [10, 20])
+            state = json.loads(
+                (json_dir / "processed_documents.json").read_text()
+            )["documents"]
+            self.assertEqual(set(state), {
+                "Glencore/old-report.pdf",
+                "Glencore/new-report.pdf",
+                "Glencore/SENS/old-sens.pdf",
+                "Glencore/SENS/new-sens.pdf",
+            })
+
+            processor.batches.clear()
+            reloaded_external, reloaded_sens = processor.process_new_data(
+                source_dir=downloads,
+                json_location=json_dir,
+            )
+            self.assertEqual(processor.batches, [])
+            self.assertEqual(reloaded_external["revenue"].tolist(), [200])
+            self.assertEqual(reloaded_sens["event_value"].tolist(), [10, 20])
+
+    def test_sens_scope_ignores_untracked_external_documents(self):
+        processor = self.RecordingProcessor()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            downloads = root / "downloads"
+            json_dir = root / "json"
+            company = downloads / "Glencore"
+            company.mkdir(parents=True)
+            (company / "untracked-report.pdf").write_bytes(b"report")
+
+            external, sens_data = processor.process_new_data(
+                source_dir=downloads,
+                json_location=json_dir,
+                process_scope="sens",
+            )
+
+        self.assertEqual(processor.batches, [])
+        self.assertTrue(external.empty)
+        self.assertTrue(sens_data.empty)
 
 
 if __name__ == "__main__":

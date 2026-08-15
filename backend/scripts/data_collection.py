@@ -195,6 +195,25 @@ class DataCollector:
         "Accept-Language": "en-US,en;q=0.9",
     }
 
+    DEFAULT_DOWNLOAD_DIR = (
+        Path(__file__).resolve().parents[2] / "data" / "downloads"
+    )
+
+    def collect_data(self, *, scrape_scope="all", save_location=None):
+        """Scrape disclosures without performing any data extraction.
+
+        ``scrape_scope`` must be ``"all"`` or ``"sens"``. The returned value
+        is the underlying scraper result: document issues for an all-source
+        scrape, or SENS announcement metadata for a SENS-only scrape.
+        """
+        if scrape_scope not in {"all", "sens"}:
+            raise ValueError("scrape_scope must be either 'all' or 'sens'")
+
+        downloads_dir = Path(save_location or self.DEFAULT_DOWNLOAD_DIR)
+        downloads_dir.mkdir(parents=True, exist_ok=True)
+        if scrape_scope == "sens":
+            return self.get_sens_data(base_dir=downloads_dir)
+        return self.scrape_and_save_reports(downloads_dir)
     def __get(self, url, timeout):
         LOGGER.info("Requesting %s (timeout=%ss)", url, timeout)
         try:
@@ -1011,10 +1030,12 @@ class DataCollector:
             years = self.__document_years(document)
             return max(years, default=0), document["score"]
 
-        downloaded_types = self.__recent_saved_types(company_folder)
-        # Always rediscover interim results: a valid prior-year file must not
-        # prevent a newer interim release from replacing it.
-        downloaded_types.discard("interim_results")
+        complete_types = self.__recent_saved_types(company_folder)
+        # Discovery still checks every type that is already complete. That is
+        # how a newly published report supersedes a valid prior-year file.
+        # ``handled_types`` prevents lower-ranked candidates of the same type
+        # from being downloaded once the newest candidate is present.
+        handled_types = set()
         accepted_years = {datetime.now().year, datetime.now().year - 1}
         responsive_urls = set()
 
@@ -1047,7 +1068,7 @@ class DataCollector:
                 len(documents),
             )
             for doc in documents:
-                if doc["type"] in downloaded_types:
+                if doc["type"] in handled_types:
                     continue
 
                 document_years = self.__document_years(doc)
@@ -1071,6 +1092,17 @@ class DataCollector:
                 )
                 output_path = company_folder / filename
 
+                if output_path.exists():
+                    LOGGER.info(
+                        "%s: newest %s candidate is already saved as %s",
+                        company_name,
+                        doc["type"],
+                        output_path,
+                    )
+                    handled_types.add(doc["type"])
+                    complete_types.add(doc["type"])
+                    continue
+
                 try:
                     LOGGER.info(
                         "%s: trying %s candidate %s",
@@ -1085,7 +1117,8 @@ class DataCollector:
                         doc["type"],
                         output_path,
                     )
-                    downloaded_types.add(doc["type"])
+                    handled_types.add(doc["type"])
+                    complete_types.add(doc["type"])
                 except requests.RequestException as error:
                     LOGGER.warning(
                         "%s: failed %s candidate %s: %s",
@@ -1107,7 +1140,7 @@ class DataCollector:
         primary_docs = discover(primary_urls)
         download_candidates(primary_docs)
 
-        if set(self.KEYWORDS) - downloaded_types and fallback_urls:
+        if set(self.KEYWORDS) - complete_types and fallback_urls:
             LOGGER.info(
                 "%s: primary sources incomplete; trying ShareData fallback",
                 company_name,
@@ -1115,7 +1148,7 @@ class DataCollector:
             fallback_docs = discover(fallback_urls)
             download_candidates(fallback_docs)
 
-        missing_types = set(self.KEYWORDS) - downloaded_types
+        missing_types = set(self.KEYWORDS) - complete_types
         if missing_types:
             if responsive_urls:
                 LOGGER.info(
@@ -1141,7 +1174,7 @@ class DataCollector:
                     company_name,
                 )
 
-        missing_types = set(self.KEYWORDS) - downloaded_types
+        missing_types = set(self.KEYWORDS) - complete_types
         if missing_types:
             LOGGER.warning(
                 "%s: finished with missing document types: %s",
