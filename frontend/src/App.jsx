@@ -11,7 +11,8 @@ import {
 } from 'recharts'
 import { formatPercent, formatScore, formatZarAbbreviated, formatZarFull } from './format'
 
-const API_BASE = 'http://localhost:4000/api/clients'
+const API_ROOT = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000/api'
+const API_BASE = `${API_ROOT}/clients`
 
 // Categorical palette, slots 1-2 (validated for scatter/all-pairs use in the
 // dataviz skill's references/palette.md, mirroring the CSS tokens in
