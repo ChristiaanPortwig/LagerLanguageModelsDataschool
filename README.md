@@ -74,7 +74,9 @@ The API atomically regenerates `data/client_data.json` after processed documents
 
 Every newly scraped SENS document is extracted and its opportunity scores are completed by Gemini in the same pipeline run. A run is marked failed if Gemini is unavailable or leaves any SENS row unscored; incomplete SENS scores are not exposed as manual frontend data-entry work.
 
-The conversational AI assistant is not exposed. Gemini remains scoped to document/SENS processing, timing intelligence, and explicit client-report generation. Generated reports are stored under `data/reports/` and include a separate formula-methodology page. A source fingerprint invalidates and deletes an existing report whenever its client data, timing intelligence, formulas, or relationship-manager assignment changes.
+The conversational AI assistant is not exposed. Gemini remains scoped to document/SENS processing, timing intelligence, and client-report generation. Generated reports are stored under `data/reports/` and include a separate formula-methodology page. A source fingerprint invalidates and deletes an existing report whenever its client data, timing intelligence, formulas, or relationship-manager assignment changes.
+
+After startup timing data is ready, the backend automatically generates any missing reports among the top three companies by opportunity score. It rechecks every five minutes by default, so reports invalidated by later data changes are recreated without regenerating reports that are still current. Override the interval with `REPORT_RECONCILE_INTERVAL_SECONDS` (minimum 60 seconds).
 
 For report generation, client and relationship-manager names and internal identifiers are replaced with opaque placeholders before the prompt is sent to Gemini. The returned narrative is re-identified locally before the report is persisted, so the provider never receives the replacement map.
 

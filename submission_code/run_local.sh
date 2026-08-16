@@ -7,6 +7,7 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 VENV_DIR="${REPO_ROOT}/.venv"
 DATA_DIR="${REPO_ROOT}/data"
 JSON_DIR="${DATA_DIR}/json"
+REPORTS_DIR="${DATA_DIR}/reports"
 
 # Replace each placeholder with a public Google Drive share URL. The value after
 # the | is the path where the backend expects that JSON file.
@@ -23,6 +24,14 @@ JSON_DOWNLOADS=(
   "https://drive.google.com/file/d/1gnqpr07s8v0Pa_XML3yr5qVWgMP4GOVD/view?usp=sharing|json/relationship_managers.json"
   "https://drive.google.com/file/d/1uIul6yxkla-Bg7NNSNmrRdgt4LKXV4ND/view?usp=sharing|json/report_manifest.json"
   "https://drive.google.com/file/d/1ABoCEtvL8nlyG5fNVvYkAQFwUcsQ7uTm/view?usp=sharing|json/wallet_sizes.json"
+)
+
+# These filenames must match json/report_manifest.json. Replace the three URL
+# placeholders with the public Google Drive links after uploading the reports.
+REPORT_DOWNLOADS=(
+  "PASTE_GLENCORE_REPORT_URL_HERE|reports/E02-Glencore-briefing.html"
+  "PASTE_BHP_GROUP_REPORT_URL_HERE|reports/E01-BHP_Group-briefing.html"
+  "PASTE_BID_CORPORATION_REPORT_URL_HERE|reports/E10-Bid_Corporation-briefing.html"
 )
 
 log() {
@@ -68,7 +77,7 @@ if [[ "${SKIP_INSTALL:-0}" != "1" ]]; then
   python -m pip install -r "${REPO_ROOT}/backend/requirements.txt"
 fi
 
-mkdir -p "${JSON_DIR}"
+mkdir -p "${JSON_DIR}" "${REPORTS_DIR}"
 
 if [[ "${SKIP_DOWNLOADS:-0}" != "1" ]]; then
   for item in "${JSON_DOWNLOADS[@]}"; do
@@ -93,6 +102,29 @@ if [[ "${SKIP_DOWNLOADS:-0}" != "1" ]]; then
       log "Downloaded file is not valid JSON: ${destination}"
       exit 1
     }
+  done
+
+  for item in "${REPORT_DOWNLOADS[@]}"; do
+    url="${item%%|*}"
+    relative_path="${item#*|}"
+    destination="${DATA_DIR}/${relative_path}"
+
+    if [[ "${url}" == PASTE_*_HERE ]]; then
+      if [[ -s "${destination}" ]]; then
+        log "No URL set for ${relative_path}; keeping the existing report."
+        continue
+      fi
+      log "Missing Google Drive URL for ${relative_path}. Edit ${SCRIPT_DIR}/run_local.sh."
+      exit 1
+    fi
+
+    log "Downloading ${relative_path}..."
+    python -m gdown "${url}" --output "${destination}"
+
+    if [[ ! -s "${destination}" ]]; then
+      log "Downloaded report is empty: ${destination}"
+      exit 1
+    fi
   done
 else
   log "Skipping Google Drive downloads (SKIP_DOWNLOADS=1)."

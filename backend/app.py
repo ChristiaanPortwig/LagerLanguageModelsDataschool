@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
@@ -38,6 +40,8 @@ LOGGER = logging.getLogger(__name__)
 SERVICE = PipelineService()
 REPORTS = ReportService(SERVICE.data_dir)
 _EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="data-pipeline")
+_REPORT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="client-reports")
+_REPORT_GENERATION_LOCK = threading.RLock()
 
 
 class PipelineRequest(BaseModel):
@@ -95,7 +99,7 @@ def _timing_timezone() -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
-async def _timing_refresh_loop():
+async def _timing_refresh_loop(ready: asyncio.Event | None = None):
     """Refresh recommendations at startup and every local business-date boundary."""
     business_timezone = _timing_timezone()
     force_refresh = False
@@ -125,15 +129,46 @@ async def _timing_refresh_loop():
             await asyncio.sleep(int(os.getenv("TIMING_GEMINI_RETRY_SECONDS", "300")))
             continue
         force_refresh = False
+        if ready is not None:
+            ready.set()
         after_refresh = datetime.now(business_timezone)
         tomorrow = (after_refresh + timedelta(days=1)).date()
         next_midnight = datetime.combine(tomorrow, datetime.min.time(), business_timezone)
         await asyncio.sleep(max(1.0, (next_midnight - after_refresh).total_seconds()))
 
 
+async def _automatic_report_loop(ready: asyncio.Event):
+    """Keep reports available for the three highest-scoring companies."""
+    await ready.wait()
+    interval_seconds = max(
+        60,
+        int(os.getenv("REPORT_RECONCILE_INTERVAL_SECONDS", "300")),
+    )
+    while True:
+        if not os.getenv("GEMINI_API_KEY"):
+            await asyncio.sleep(interval_seconds)
+            continue
+        if SERVICE.status()["running"]:
+            await asyncio.sleep(min(60, interval_seconds))
+            continue
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                _REPORT_EXECUTOR,
+                _generate_missing_top_company_reports,
+            )
+        except Exception:
+            LOGGER.exception("Automatic top-company report generation failed")
+        await asyncio.sleep(interval_seconds)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    tasks = [asyncio.create_task(_timing_refresh_loop())]
+    timing_ready = asyncio.Event()
+    tasks = [
+        asyncio.create_task(_timing_refresh_loop(timing_ready)),
+        asyncio.create_task(_automatic_report_loop(timing_ready)),
+    ]
     if os.getenv("PIPELINE_SCHEDULER_ENABLED", "true").lower() in {"1", "true", "yes"}:
         sens_interval = int(os.getenv("SENS_INTERVAL_SECONDS", "3600"))
         full_interval = int(os.getenv("FULL_INTERVAL_SECONDS", "86400"))
@@ -189,6 +224,77 @@ def _clients() -> list[dict]:
     return [REPORTS.enrich_relationship(client) for client in clients]
 
 
+def _clients_with_current_timing() -> list[dict]:
+    clients = _clients()
+    try:
+        timing_payload = SERVICE.timing_intelligence()
+        timing_by_entity = {
+            str(item.get("entity_id")): item
+            for item in timing_payload.get("clients", [])
+        }
+        return [
+            {
+                **client,
+                "timing_intelligence": timing_by_entity.get(
+                    str(client.get("entity_id")), client.get("timing_intelligence")
+                ),
+            }
+            for client in clients
+        ]
+    except Exception:
+        LOGGER.exception("Could not load current timing for client reports")
+        return clients
+
+
+def _opportunity_score(client: dict) -> float:
+    try:
+        score = float(client.get("opportunity_score") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return score if math.isfinite(score) else 0.0
+
+
+def _generate_report(client: dict) -> dict:
+    """Generate one report while preventing duplicate concurrent Gemini calls."""
+    with _REPORT_GENERATION_LOCK:
+        prompt = build_briefing_prompt(client)
+        private_narrative = Gemini_Client().call_gemini_ustructured(
+            prompt=prompt,
+            system_instruction=SYSTEM_INSTRUCTION,
+        )
+        narrative = restore_briefing_placeholders(private_narrative, client)
+        return REPORTS.generate(client, narrative)
+
+
+def _generate_missing_top_company_reports() -> list[str]:
+    """Generate absent reports for the top three clients by opportunity score."""
+    clients = sorted(
+        _clients_with_current_timing(),
+        key=lambda client: (
+            -_opportunity_score(client),
+            str(client.get("entity_id", "")),
+        ),
+    )[:3]
+    generated = []
+    for client in clients:
+        entity_id = str(client.get("entity_id", ""))
+        try:
+            # Check again while holding the generation lock so a simultaneous
+            # manual request cannot result in a duplicate provider call.
+            with _REPORT_GENERATION_LOCK:
+                if REPORTS.status(client)["available"]:
+                    continue
+                _generate_report(client)
+            generated.append(entity_id)
+        except Exception:
+            LOGGER.exception(
+                "Automatic report generation failed for client %s", entity_id
+            )
+    if generated:
+        LOGGER.info("Automatically generated reports for: %s", ", ".join(generated))
+    return generated
+
+
 def _client(client_id: str) -> dict:
     target = client_id.casefold()
     client = next(
@@ -217,24 +323,7 @@ def _client(client_id: str) -> dict:
 
 
 def _dashboard_payload() -> dict:
-    clients = _clients()
-    try:
-        timing_payload = SERVICE.timing_intelligence()
-        timing_by_entity = {
-            str(item.get("entity_id")): item
-            for item in timing_payload.get("clients", [])
-        }
-        clients = [
-            {
-                **client,
-                "timing_intelligence": timing_by_entity.get(
-                    str(client.get("entity_id")), client.get("timing_intelligence")
-                ),
-            }
-            for client in clients
-        ]
-    except Exception:
-        LOGGER.exception("Dashboard could not load the latest payment timing")
+    clients = _clients_with_current_timing()
     numeric = lambda value: float(value) if isinstance(value, (int, float)) else 0.0
     refinancing = sorted(
         (client for client in clients if client.get("refinancing_flag")),
@@ -405,17 +494,11 @@ def get_client_report(client_id: str):
 @app.post("/api/clients/{client_id}/report")
 def create_client_report(client_id: str):
     client = _client(client_id)
-    prompt = build_briefing_prompt(client)
     try:
-        private_narrative = Gemini_Client().call_gemini_ustructured(
-            prompt=prompt,
-            system_instruction=SYSTEM_INSTRUCTION,
-        )
+        return _generate_report(client)
     except Exception as error:
         LOGGER.exception("Report generation failed")
         raise HTTPException(status_code=502, detail=f"Report generation failed: {error}")
-    narrative = restore_briefing_placeholders(private_narrative, client)
-    return REPORTS.generate(client, narrative)
 
 
 @app.post("/api/clients/{client_id}/briefing", include_in_schema=False)
