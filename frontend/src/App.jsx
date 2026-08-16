@@ -9,10 +9,19 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import { apiRequest } from './api'
+import {
+  AssistantBar,
+  ConfidenceBadge,
+  ConfidenceDetails,
+  DataQualityPage,
+  DocumentUploadForm,
+  FormulasPage,
+  SettingsPage,
+  WalletCalculation,
+} from './features'
+import { formatFieldName, overallConfidence } from './featureFormat'
 import { formatPercent, formatScore, formatZarAbbreviated, formatZarFull } from './format'
-
-const API_ROOT = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000/api'
-const API_BASE = `${API_ROOT}/clients`
 
 // Categorical palette, slots 1-2 - Standard Bank blue + a warm complement,
 // re-validated for scatter/all-pairs use with the dataviz skill's
@@ -33,25 +42,38 @@ const CHART_INK = {
   surface: isDarkMode ? '#1a1a19' : '#fcfcfb',
 }
 
-function Header({ clientCount }) {
+function Header({ clientCount, view, onNavigate }) {
+  const links = [
+    ['grid', 'Dashboard'],
+    ['data', 'Data gaps'],
+    ['formulas', 'Formulas'],
+    ['settings', 'Settings'],
+  ]
   return (
     <header className="app-header">
       <h1 className="app-title">Share of Wallet Dashboard</h1>
-      {clientCount != null && (
-        <span className="app-header-meta">{clientCount} corporate clients</span>
-      )}
+      <div className="header-actions">
+        <nav className="app-nav" aria-label="Main navigation">
+          {links.map(([key, label]) => (
+            <button
+              type="button"
+              key={key}
+              className={view === key ? 'active' : ''}
+              onClick={() => onNavigate(key)}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
+        {clientCount != null && (
+          <span className="app-header-meta">{clientCount} corporate clients</span>
+        )}
+      </div>
     </header>
   )
 }
 
-function PortfolioSummary({ clients }) {
-  const totalClients = clients.length
-  const avgShare = totalClients
-    ? clients.reduce((sum, c) => sum + c.syn_bank_share_pct, 0) / totalClients
-    : 0
-  const totalWallet = clients.reduce((sum, c) => sum + c.estimated_total_wallet_zar, 0)
-  const totalGap = clients.reduce((sum, c) => sum + c.wallet_gap_zar, 0)
-
+function PortfolioSummary({ summary }) {
   return (
     <>
       <h2 className="view-heading">Portfolio Summary</h2>
@@ -59,22 +81,22 @@ function PortfolioSummary({ clients }) {
         <div className="stat-grid">
           <div>
             <div className="stat-label">Total Clients</div>
-            <div className="stat-value">{totalClients}</div>
+            <div className="stat-value">{summary.total_clients}</div>
           </div>
           <div>
             <div className="stat-label">Avg. Synthetic Bank Share</div>
-            <div className="stat-value">{formatPercent(avgShare)}</div>
+            <div className="stat-value">{formatPercent(summary.average_syn_bank_share_pct)}</div>
           </div>
           <div>
             <div className="stat-label">Total Estimated Wallet</div>
-            <div className="stat-value" title={formatZarFull(totalWallet)}>
-              {formatZarAbbreviated(totalWallet)}
+            <div className="stat-value" title={formatZarFull(summary.total_estimated_wallet_zar)}>
+              {formatZarAbbreviated(summary.total_estimated_wallet_zar)}
             </div>
           </div>
           <div>
             <div className="stat-label">Total Wallet Gap</div>
-            <div className="stat-value accent" title={formatZarFull(totalGap)}>
-              {formatZarAbbreviated(totalGap)}
+            <div className="stat-value accent" title={formatZarFull(summary.total_wallet_gap_zar)}>
+              {formatZarAbbreviated(summary.total_wallet_gap_zar)}
             </div>
           </div>
         </div>
@@ -83,7 +105,7 @@ function PortfolioSummary({ clients }) {
   )
 }
 
-function ClientTable({ clients, onSelectClient, compact = false }) {
+function ClientTable({ clients, onSelectClient, onSelectConfidence, compact = false }) {
   const rows = compact
     ? [...clients].sort((a, b) => b.opportunity_score - a.opportunity_score).slice(0, 6)
     : clients
@@ -107,6 +129,7 @@ function ClientTable({ clients, onSelectClient, compact = false }) {
                 <th className="numeric">{compact ? 'Wallet' : 'Est. Total Wallet'}</th>
                 <th className="numeric">{compact ? 'Syn. Share' : 'Synthetic Bank Share'}</th>
                 <th className="numeric">{compact ? 'Score' : 'Opportunity Score'}</th>
+                <th>Confidence</th>
               </tr>
             </thead>
             <tbody>
@@ -123,6 +146,15 @@ function ClientTable({ clients, onSelectClient, compact = false }) {
                   </td>
                   <td className="numeric">{formatPercent(client.syn_bank_share_pct)}</td>
                   <td className="numeric">{formatScore(client.opportunity_score)}</td>
+                  <td>
+                    <ConfidenceBadge
+                      level={overallConfidence(client.confidence)}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        onSelectConfidence(client.entity_id, 'confidence')
+                      }}
+                    />
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -209,13 +241,6 @@ function OpportunityHeatmap({ clients, onSelectClient, compact = false }) {
   )
 }
 
-const PILLARS = [
-  { key: 'syn_txn_banking_pct', label: 'Transactional Banking' },
-  { key: 'syn_global_markets_pct', label: 'Global Markets' },
-  { key: 'syn_trade_finance_pct', label: 'Trade Finance' },
-  { key: 'lending_ib_pct', label: 'Lending / IB' },
-]
-
 function FlagBadge({ active, variant, activeLabel, inactiveLabel }) {
   if (active) {
     return (
@@ -227,15 +252,9 @@ function FlagBadge({ active, variant, activeLabel, inactiveLabel }) {
   return <span className="badge badge-neutral">{inactiveLabel}</span>
 }
 
-function ProactiveFlags({ clients, onSelectClient, compact = false }) {
-  const refinancingAll = clients
-    .filter((c) => c.refinancing_flag)
-    .sort((a, b) => a.refinancing_window_days - b.refinancing_window_days)
-  const mismatchedAll = compact
-    ? clients
-        .filter((c) => c.import_mismatch_flag)
-        .sort((a, b) => b.wallet_gap_zar - a.wallet_gap_zar)
-    : clients.filter((c) => c.import_mismatch_flag)
+function ProactiveFlags({ flags, onSelectClient, compact = false }) {
+  const refinancingAll = flags.refinancing
+  const mismatchedAll = flags.import_trade_finance_gaps
 
   const refinancing = compact ? refinancingAll.slice(0, 3) : refinancingAll
   const mismatched = compact ? mismatchedAll.slice(0, 3) : mismatchedAll
@@ -318,7 +337,7 @@ function ProactiveFlags({ clients, onSelectClient, compact = false }) {
                   <th>Entity Name</th>
                   <th>Sector</th>
                   <th>Status</th>
-                  <th className="numeric">Wallet Gap</th>
+                  <th className="numeric">Est. Trade Gap</th>
                 </tr>
               </thead>
               <tbody>
@@ -327,10 +346,21 @@ function ProactiveFlags({ clients, onSelectClient, compact = false }) {
                     <td className="entity-name">{client.entity_name}</td>
                     <td className="sector">{client.sector}</td>
                     <td>
-                      <FlagBadge active variant="serious" activeLabel="Mismatch detected" />
+                      <FlagBadge
+                        active
+                        variant="serious"
+                        activeLabel={
+                          client.import_trade_finance_gap.coverage_pct == null
+                            ? 'No captured cover'
+                            : `${client.import_trade_finance_gap.coverage_pct}% covered`
+                        }
+                      />
                     </td>
-                    <td className="numeric" title={formatZarFull(client.wallet_gap_zar)}>
-                      {formatZarAbbreviated(client.wallet_gap_zar)}
+                    <td
+                      className="numeric"
+                      title={formatZarFull(client.import_trade_finance_gap.estimated_gap_zar)}
+                    >
+                      {formatZarAbbreviated(client.import_trade_finance_gap.estimated_gap_zar)}
                     </td>
                   </tr>
                 ))}
@@ -352,13 +382,7 @@ function BriefingReport({ entityId }) {
     setLoading(true)
     setError(null)
     setReport(null)
-    fetch(`${API_BASE}/${entityId}/briefing`, { method: 'POST' })
-      .then((res) => {
-        if (!res.ok) {
-          throw new Error(`Request failed with status ${res.status}`)
-        }
-        return res.json()
-      })
+    apiRequest(`/clients/${entityId}/briefing`, { method: 'POST' })
       .then((data) => setReport(data.report))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false))
@@ -387,25 +411,41 @@ function BriefingReport({ entityId }) {
   )
 }
 
-function ClientDetail({ entityId, onBack }) {
+function ClientDetail({ entityId, onBack, initialSection, onClientChanged }) {
   const [client, setClient] = useState(null)
+  const [calculation, setCalculation] = useState(null)
+  const [missingDocuments, setMissingDocuments] = useState([])
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [showUpload, setShowUpload] = useState(false)
+
+  const loadCalculation = () =>
+    apiRequest(`/clients/${entityId}/calculation`).then(setCalculation)
 
   useEffect(() => {
     setLoading(true)
     setError(null)
-    fetch(`${API_BASE}/${entityId}`)
-      .then((res) => {
-        if (!res.ok) {
-          throw new Error(`Request failed with status ${res.status}`)
-        }
-        return res.json()
+    Promise.all([
+      apiRequest(`/clients/${entityId}`),
+      apiRequest(`/clients/${entityId}/calculation`),
+      apiRequest('/missing-data'),
+    ])
+      .then(([clientData, calculationData, missingData]) => {
+        setClient(clientData)
+        setCalculation(calculationData)
+        setMissingDocuments(
+          missingData.documents.filter((item) => item.company === clientData.entity_name),
+        )
       })
-      .then((data) => setClient(data))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false))
   }, [entityId])
+
+  useEffect(() => {
+    if (!loading && initialSection) {
+      document.getElementById(initialSection)?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [initialSection, loading])
 
   if (loading) return <p className="state-message">Loading client...</p>
   if (error) return <p className="state-message">Failed to load client: {error}</p>
@@ -445,19 +485,36 @@ function ClientDetail({ entityId, onBack }) {
           <div>
             <div className="stat-label">Opportunity Score</div>
             <div className="stat-value accent">{formatScore(client.opportunity_score)}</div>
+            <ConfidenceBadge
+              level={overallConfidence(calculation?.confidence)}
+              onClick={() => document.getElementById('confidence')?.scrollIntoView({ behavior: 'smooth' })}
+            />
           </div>
         </div>
       </section>
 
+      <section className="panel detail-section" id="confidence">
+        <h2>Score Confidence</h2>
+        <ConfidenceDetails
+          entityId={entityId}
+          calculation={calculation}
+          onDataSaved={(updated) => {
+            setClient(updated)
+            loadCalculation()
+            onClientChanged?.()
+          }}
+        />
+      </section>
+
       <section className="panel detail-section">
         <h2>Pillar Breakdown</h2>
-        {PILLARS.map(({ key, label }) => (
+        {(client.pillar_breakdown || []).map(({ key, label, value }) => (
           <div className="pillar-row" key={key}>
             <div className="pillar-label">{label}</div>
             <div className="pillar-track">
-              <div className="pillar-fill" style={{ width: `${client[key]}%` }} />
+              <div className="pillar-fill" style={{ width: `${value}%` }} />
             </div>
-            <div className="pillar-value">{formatPercent(client[key], 0)}</div>
+            <div className="pillar-value">{formatPercent(value, 0)}</div>
           </div>
         ))}
       </section>
@@ -473,6 +530,7 @@ function ClientDetail({ entityId, onBack }) {
               activeLabel={`Window: ${client.refinancing_window_days} days`}
               inactiveLabel="No refinancing signal"
             />
+            <p className="flag-reason">{client.refinancing_opportunity?.reason}</p>
           </div>
           <div className="flag-item">
             <div className="stat-label">Import Mismatch</div>
@@ -482,8 +540,45 @@ function ClientDetail({ entityId, onBack }) {
               activeLabel="Mismatch detected"
               inactiveLabel="No mismatch detected"
             />
+            <p className="flag-reason">{client.import_trade_finance_gap?.reason}</p>
+          </div>
+          <div className="flag-item">
+            <div className="stat-label">Missing PDFs</div>
+            <FlagBadge
+              active={missingDocuments.length > 0}
+              variant="warning"
+              activeLabel={`${missingDocuments.length} document${missingDocuments.length === 1 ? '' : 's'} missing`}
+              inactiveLabel="Current PDFs available"
+            />
           </div>
         </div>
+        {missingDocuments.length > 0 && (
+          <div className="document-flags">
+            {missingDocuments.map((document) => (
+              <span className="field-chip-static" key={document.document_type}>
+                {formatFieldName(document.document_type)}
+              </span>
+            ))}
+            <button type="button" className="text-button" onClick={() => setShowUpload(!showUpload)}>
+              {showUpload ? 'Close upload' : 'Upload missing PDF'}
+            </button>
+          </div>
+        )}
+        {showUpload && (
+          <div className="nested-form">
+            <DocumentUploadForm
+              entityId={entityId}
+              initialType={missingDocuments[0]?.document_type}
+              onCancel={() => setShowUpload(false)}
+              onUploaded={() => setShowUpload(false)}
+            />
+          </div>
+        )}
+      </section>
+
+      <section className="panel detail-section">
+        <h2>Wallet Calculation</h2>
+        <WalletCalculation calculation={calculation?.wallet_calculation} />
       </section>
 
       <BriefingReport key={client.entity_id} entityId={client.entity_id} />
@@ -550,50 +645,60 @@ function DashboardPanel({
 
 function App() {
   const [clients, setClients] = useState([])
+  const [summary, setSummary] = useState(null)
+  const [proactiveFlags, setProactiveFlags] = useState(null)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [view, setView] = useState('grid') // 'grid' | 'detail'
+  const [view, setView] = useState('grid')
   const [selectedEntityId, setSelectedEntityId] = useState(null)
+  const [detailSection, setDetailSection] = useState(null)
   // Which of table/heatmap/flags is expanded, or null for the default grid.
   // Kept separate from `view` so opening a client's detail page and coming
   // back restores whichever panel was focused, instead of resetting it.
   const [focusedPanel, setFocusedPanel] = useState(null)
 
-  useEffect(() => {
-    fetch(API_BASE)
-      .then((res) => {
-        if (!res.ok) {
-          throw new Error(`Request failed with status ${res.status}`)
-        }
-        return res.json()
+  const loadDashboard = () => {
+    setError(null)
+    return apiRequest('/dashboard')
+      .then((data) => {
+        setClients(data.clients)
+        setSummary(data.summary)
+        setProactiveFlags(data.proactive_flags)
       })
-      .then((data) => setClients(data))
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false))
-  }, [])
+  }
 
-  const handleSelectClient = (entityId) => {
+  useEffect(() => { loadDashboard() }, [])
+
+  const handleSelectClient = (entityId, section = null) => {
     setSelectedEntityId(entityId)
+    setDetailSection(section)
     setView('detail')
+  }
+
+  const handleNavigate = (nextView) => {
+    setView(nextView)
+    setDetailSection(null)
   }
 
   const handleCollapsePanel = () => setFocusedPanel(null)
 
-  const refinancingCount = clients.filter((c) => c.refinancing_flag).length
-  const mismatchCount = clients.filter((c) => c.import_mismatch_flag).length
-
   return (
     <div className="app-shell">
-      {/* Reserved for the global prompt bar (added in a later step). */}
-      <div className="prompt-bar-placeholder" aria-hidden="true" />
+      <AssistantBar focusedEntityId={view === 'detail' ? selectedEntityId : null} />
 
-      <Header clientCount={clients.length || null} />
+      <Header
+        clientCount={summary?.total_clients || null}
+        view={view}
+        onNavigate={handleNavigate}
+      />
 
       <div className="view-container">
         {loading && <p className="state-message">Loading clients...</p>}
         {error && <p className="state-message">Failed to load clients: {error}</p>}
 
-        {!loading && !error && (
+        {!loading && !error && summary && proactiveFlags && (
           <>
             {view === 'grid' && (
               <div
@@ -602,7 +707,7 @@ function App() {
                 }`}
               >
                 <section className="grid-panel panel-summary">
-                  <PortfolioSummary clients={clients} />
+                  <PortfolioSummary summary={summary} />
                 </section>
 
                 <DashboardPanel
@@ -615,6 +720,7 @@ function App() {
                 >
                   <ClientTable
                     clients={clients}
+                    onSelectConfidence={handleSelectClient}
                     onSelectClient={
                       focusedPanel === 'table' ? handleSelectClient : () => setFocusedPanel('table')
                     }
@@ -628,7 +734,7 @@ function App() {
                   onFocus={setFocusedPanel}
                   onCollapse={handleCollapsePanel}
                   stripTitle="Opportunity Heatmap"
-                  stripStat={`${refinancingCount} refinancing signals`}
+                  stripStat={`${summary.refinancing_flag_count} refinancing signals`}
                 >
                   <OpportunityHeatmap
                     clients={clients}
@@ -647,10 +753,10 @@ function App() {
                   onFocus={setFocusedPanel}
                   onCollapse={handleCollapsePanel}
                   stripTitle="Proactive Flags"
-                  stripStat={`${refinancingCount + mismatchCount} flags`}
+                  stripStat={`${summary.total_flag_count} flags`}
                 >
                   <ProactiveFlags
-                    clients={clients}
+                    flags={proactiveFlags}
                     onSelectClient={
                       focusedPanel === 'flags' ? handleSelectClient : () => setFocusedPanel('flags')
                     }
@@ -661,8 +767,21 @@ function App() {
             )}
 
             {view === 'detail' && (
-              <ClientDetail entityId={selectedEntityId} onBack={() => setView('grid')} />
+              <ClientDetail
+                entityId={selectedEntityId}
+                initialSection={detailSection}
+                onClientChanged={loadDashboard}
+                onBack={() => setView('grid')}
+              />
             )}
+
+            {view === 'data' && (
+              <DataQualityPage clients={clients} onClientsChanged={loadDashboard} />
+            )}
+
+            {view === 'formulas' && <FormulasPage />}
+
+            {view === 'settings' && <SettingsPage onClientsChanged={loadDashboard} />}
           </>
         )}
       </div>

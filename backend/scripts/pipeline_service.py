@@ -19,6 +19,7 @@ from backend.scripts.calculate_client_score import calculate_client_score
 from backend.scripts.data_aggregation import (
     build_client_wallet_baseline,
     convert_client_table_to_dashboard_schema,
+    derive_opportunity_flags,
     find_cross_ledger_overlaps,
     save_dashboard_clients_to_json,
 )
@@ -39,6 +40,7 @@ DEFAULT_SCORE_WEIGHTS = {
     "sens_weight": 0.40,
     "relationship_weight": 0.10,
 }
+DEFAULT_SENS_HALF_LIFE_DAYS = 90.0
 
 
 class PipelineBusyError(RuntimeError):
@@ -207,6 +209,11 @@ class PipelineService:
             calculation_details=details,
             missing_data=missing,
             score_weights=weights,
+            opportunity_flags=derive_opportunity_flags(
+                baseline,
+                external,
+                sens,
+            ),
         )
         save_dashboard_clients_to_json(records, self.client_path)
         self._write_json(
@@ -316,11 +323,18 @@ class PipelineService:
         finally:
             self._lock.release()
 
-    def update_score_weights(self, values: dict[str, float]) -> list:
+    def update_scoring_settings(self, values: dict[str, float]) -> list:
         if not self._lock.acquire(blocking=False):
             raise PipelineBusyError("A pipeline update is already running")
         try:
-            weights = {**self.score_weights(), **values}
+            valid_settings = {*DEFAULT_SCORE_WEIGHTS, "sens_half_life_days"}
+            unknown = sorted(set(values).difference(valid_settings))
+            if unknown:
+                raise ValueError("Unknown scoring settings: " + ", ".join(unknown))
+            weight_updates = {
+                key: value for key, value in values.items() if key in DEFAULT_SCORE_WEIGHTS
+            }
+            weights = {**self.score_weights(), **weight_updates}
             if set(weights) != set(DEFAULT_SCORE_WEIGHTS):
                 raise ValueError(
                     "Only gap_weight, sens_weight and relationship_weight are valid"
@@ -333,14 +347,40 @@ class PipelineService:
                 for value in weights.values()
             ) or not math.isclose(sum(weights.values()), 1.0, abs_tol=1e-9):
                 raise ValueError("Scoring weights must be non-negative and sum to 1")
-            self._write_json(self.config_path, {"score_weights": weights})
+
+            half_life_days = values.get(
+                "sens_half_life_days", self.sens_half_life_days()
+            )
+            if (
+                isinstance(half_life_days, bool)
+                or not isinstance(half_life_days, (int, float))
+                or not math.isfinite(float(half_life_days))
+                or float(half_life_days) <= 0
+            ):
+                raise ValueError("sens_half_life_days must be a positive finite number")
+
+            self._write_json(
+                self.config_path,
+                {
+                    "score_weights": weights,
+                    "sens_half_life_days": float(half_life_days),
+                },
+            )
             return self.aggregate()
         finally:
             self._lock.release()
 
+    def update_score_weights(self, values: dict[str, float]) -> list:
+        """Backward-compatible wrapper for callers that only update weights."""
+        return self.update_scoring_settings(values)
+
     def score_weights(self) -> dict[str, float]:
         config = self._read_json(self.config_path, {})
         return {**DEFAULT_SCORE_WEIGHTS, **config.get("score_weights", {})}
+
+    def sens_half_life_days(self) -> float:
+        config = self._read_json(self.config_path, {})
+        return float(config.get("sens_half_life_days", DEFAULT_SENS_HALF_LIFE_DAYS))
 
     def formulas(self) -> dict[str, Any]:
         return {
@@ -354,7 +394,7 @@ class PipelineService:
                 "sum(pillar_wallet_gap * pillar_score) / sum(pillar_wallet_gap)"
             ),
             "sens_decay": "score * 2 ** (-age_days / half_life_days)",
-            "sens_half_life_days": 90,
+            "sens_half_life_days": self.sens_half_life_days(),
             "wallet": self._read_json(self.details_path, {}).get("wallet", {}),
         }
 
@@ -397,18 +437,32 @@ class PipelineService:
             if column not in scored:
                 scored[column] = 0.0
             scored[column] = pd.to_numeric(scored[column], errors="coerce").fillna(0.0)
-        return processor.apply_sens_score_decay(scored, half_life_days=90)
+        return processor.apply_sens_score_decay(
+            scored, half_life_days=self.sens_half_life_days()
+        )
 
     def _load_or_build_baseline(self) -> pd.DataFrame:
         signature = self._ledger_signature()
         cached = self._read_json(self.baseline_path, {})
-        if cached.get("source_signature") == signature and cached.get("records"):
-            return pd.DataFrame(cached["records"])
+        cached_records = cached.get("records")
+        if cached.get("source_signature") == signature and cached_records:
+            cached_frame = pd.DataFrame(cached_records)
+            required_flag_columns = {
+                "cross_border_outbound_total_zar",
+                "import_trade_finance_total_zar",
+            }
+            if required_flag_columns.issubset(cached_frame.columns):
+                return cached_frame
 
         # Existing dashboard data is an exact persisted projection of the
         # baseline and avoids loading multi-gigabyte ledgers on first upgrade.
         existing = self._read_json(self.client_path, [])
-        baseline = self._baseline_from_dashboard(existing)
+        has_flag_inputs = bool(existing) and all(
+            "cross_border_outbound_total_zar" in row
+            and "import_trade_finance_total_zar" in row
+            for row in existing
+        )
+        baseline = self._baseline_from_dashboard(existing) if has_flag_inputs else pd.DataFrame()
         if baseline.empty:
             required = [
                 self.data_dir / "transactional_banking.csv",
@@ -445,6 +499,8 @@ class PipelineService:
                 "cross_border_total_zar": ("syn_global_markets_total_zar",),
                 "trade_finance_total_zar": ("syn_trade_finance_total_zar", "syn_trade_finace_total_zar"),
                 "lending_signal_total_zar": ("syn_lending_ib_total_zar",),
+                "cross_border_outbound_total_zar": ("cross_border_outbound_total_zar",),
+                "import_trade_finance_total_zar": ("import_trade_finance_total_zar",),
             }
             values = {}
             for target, sources in aliases.items():
@@ -460,7 +516,15 @@ class PipelineService:
                 "sector": row["sector"],
                 **values,
                 "lending_signal_txn_count": 0,
-                "syn_bank_observed_total_zar": sum(values.values()),
+                "syn_bank_observed_total_zar": sum(
+                    values[key]
+                    for key in (
+                        "txn_banking_total_zar",
+                        "cross_border_total_zar",
+                        "trade_finance_total_zar",
+                        "lending_signal_total_zar",
+                    )
+                ),
             })
         return pd.DataFrame(output)
 

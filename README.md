@@ -38,6 +38,7 @@ The mounted `data/` directory is the persistent source of truth. SENS collection
 
 | Method | Path | Purpose |
 |---|---|---|
+| GET | `/api/dashboard` | Complete frontend payload: clients, portfolio totals and sorted opportunity flags |
 | GET | `/api/clients` | Dashboard-ready client records |
 | GET | `/api/clients/{id}` | One company with scores, confidence and audit data |
 | GET | `/api/clients/{id}/calculation` | Wallet formulas, score components and low-confidence reasons |
@@ -48,7 +49,7 @@ The mounted `data/` directory is the persistent source of truth. SENS collection
 | PATCH | `/api/clients/{id}/missing-data` | Supply missing standardized financial values |
 | PATCH | `/api/opportunities/{record_id}` | Supply missing 0–1 SENS pillar scores |
 | GET | `/api/formulas` | Global scoring formulas and all wallet calculations |
-| PUT | `/api/settings/scoring` | Change the three scoring weights (must sum to 1) |
+| PUT | `/api/settings/scoring` | Change scoring weights (must sum to 1) and/or SENS half-life |
 | POST | `/api/pipeline/run` | Trigger `{"scope":"sens"}` or `{"scope":"all"}` |
 | GET | `/api/pipeline/status` | Poll scheduled/manual pipeline state |
 
@@ -65,6 +66,13 @@ Opportunity update body:
 ```
 
 The API atomically regenerates `data/client_data.json` after processed documents, financial corrections, opportunity-score corrections, or scoring-weight changes. Existing dashboard field names remain available alongside the richer audit schema.
+
+Opportunity flags are calculated by the backend during every regeneration:
+
+- Refinancing is flagged when disclosed debt enters a 180-day maturity window or an upcoming SENS refinancing completion falls inside that window.
+- Import/trade finance is flagged when captured import trade finance covers less than 10% of disclosed imports or observed outbound cross-border payment activity.
+
+Each client record includes the supporting dates, amounts, coverage and human-readable reason used by the frontend.
 
 ## Local development
 

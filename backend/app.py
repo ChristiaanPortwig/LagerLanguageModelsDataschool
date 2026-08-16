@@ -9,6 +9,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from typing import Literal
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
@@ -24,7 +25,6 @@ from backend.prompts_briefing import (
 )
 from backend.scripts.gemini_client import Gemini_Client
 from backend.scripts.pipeline_service import (
-    DEFAULT_SCORE_WEIGHTS,
     PipelineBusyError,
     PipelineService,
 )
@@ -56,16 +56,15 @@ class OpportunityScoreUpdate(BaseModel):
 
 
 class ScoreWeightUpdate(BaseModel):
-    gap_weight: float = Field(DEFAULT_SCORE_WEIGHTS["gap_weight"], ge=0)
-    sens_weight: float = Field(DEFAULT_SCORE_WEIGHTS["sens_weight"], ge=0)
-    relationship_weight: float = Field(
-        DEFAULT_SCORE_WEIGHTS["relationship_weight"], ge=0
-    )
+    gap_weight: float | None = Field(None, ge=0)
+    sens_weight: float | None = Field(None, ge=0)
+    relationship_weight: float | None = Field(None, ge=0)
+    sens_half_life_days: float | None = Field(None, gt=0)
 
     @model_validator(mode="after")
-    def weights_sum_to_one(self):
-        if abs(sum(self.model_dump().values()) - 1.0) > 1e-9:
-            raise ValueError("Scoring weights must sum to 1")
+    def has_a_setting(self):
+        if not self.model_dump(exclude_none=True):
+            raise ValueError("At least one scoring setting is required")
         return self
 
 
@@ -159,6 +158,48 @@ def _client(client_id: str) -> dict:
     return client
 
 
+def _dashboard_payload() -> dict:
+    clients = _clients()
+    numeric = lambda value: float(value) if isinstance(value, (int, float)) else 0.0
+    refinancing = sorted(
+        (client for client in clients if client.get("refinancing_flag")),
+        key=lambda client: client.get("refinancing_window_days") or 10**9,
+    )
+    import_gaps = sorted(
+        (client for client in clients if client.get("import_mismatch_flag")),
+        key=lambda client: numeric(
+            client.get("import_trade_finance_gap", {}).get("estimated_gap_zar")
+        ),
+        reverse=True,
+    )
+    count = len(clients)
+    details = SERVICE._read_json(SERVICE.details_path, {})
+    return {
+        "generated_at": details.get("generated_at"),
+        "clients": clients,
+        "summary": {
+            "total_clients": count,
+            "average_syn_bank_share_pct": (
+                sum(numeric(client.get("syn_bank_share_pct")) for client in clients) / count
+                if count else 0.0
+            ),
+            "total_estimated_wallet_zar": sum(
+                numeric(client.get("estimated_total_wallet_zar")) for client in clients
+            ),
+            "total_wallet_gap_zar": sum(
+                numeric(client.get("wallet_gap_zar")) for client in clients
+            ),
+            "refinancing_flag_count": len(refinancing),
+            "import_trade_finance_gap_count": len(import_gaps),
+            "total_flag_count": len(refinancing) + len(import_gaps),
+        },
+        "proactive_flags": {
+            "refinancing": refinancing,
+            "import_trade_finance_gaps": import_gaps,
+        },
+    }
+
+
 def _company_folder(client: dict) -> Path:
     folder_name = re.sub(r"[^A-Za-z0-9]+", "_", client["entity_name"]).strip("_")
     return SERVICE.downloads_dir / folder_name
@@ -187,6 +228,12 @@ def get_clients():
     return _clients()
 
 
+@app.get("/api/dashboard")
+def get_dashboard():
+    """Return the complete data model consumed by the dashboard view."""
+    return _dashboard_payload()
+
+
 @app.get("/api/clients/{client_id}")
 def get_client(client_id: str):
     return _client(client_id)
@@ -207,27 +254,12 @@ def get_client_calculation(client_id: str):
 
 @app.post("/api/clients/{client_id}/briefing")
 def create_client_briefing(client_id: str):
-    if not _CLIENTS_CACHE:
-        raise HTTPException(status_code=500, detail="Client data cache is empty")
-
-    try:
-        clients = _CLIENTS_CACHE
-    except Exception as err:
-        print(f"Failed to read client data: {err}")
-        raise HTTPException(status_code=500, detail="Failed to load client data")
-
-    target = client_id.upper()
-    client = next((c for c in clients if c["entity_id"].upper() == target), None)
-
-    if client is None:
-        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found")
-
-    # Sends the built prompt to Gemini and returns its generated response.
+    client = _client(client_id)
     prompt = build_briefing_prompt(client)
 
-    client = Gemini_Client()
-    output = client.call_gemini_ustructured(prompt=prompt, system_instruction=SYSTEM_INSTRUCTION)
-    print(f"Gemini request made\nOutput:\n{output}")
+    output = Gemini_Client().call_gemini_ustructured(
+        prompt=prompt, system_instruction=SYSTEM_INSTRUCTION
+    )
     return {"report": output}
 
 
@@ -344,12 +376,13 @@ def get_formulas():
 @app.put("/api/settings/scoring")
 def update_scoring_settings(payload: ScoreWeightUpdate):
     try:
-        records = SERVICE.update_score_weights(payload.model_dump())
+        records = SERVICE.update_scoring_settings(payload.model_dump(exclude_none=True))
     except PipelineBusyError as error:
         raise HTTPException(status_code=409, detail=str(error))
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error))
     return {
         "score_weights": SERVICE.score_weights(),
+        "sens_half_life_days": SERVICE.sens_half_life_days(),
         "client_count": len(records),
     }

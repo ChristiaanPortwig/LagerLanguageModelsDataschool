@@ -29,6 +29,7 @@ dashboard_json = final_client_table.to_dict(orient='records')
 import json
 import math
 import os
+from datetime import date, timedelta
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -36,6 +37,10 @@ import pandas as pd
 
 from backend.scripts.calculate_client_score import calculate_client_score
 from backend.scripts.wallet_size import calculate_total_wallet_size
+
+
+IMPORT_TRADE_FINANCE_COVERAGE_THRESHOLD = 0.10
+REFINANCING_WINDOW_DAYS = 180
 
 
 def find_cross_ledger_overlaps(
@@ -162,6 +167,12 @@ def build_client_wallet_baseline(
         .sum()
         .rename('cross_border_total_zar')
     )
+    cb_outbound_totals = (
+        cb_core.loc[cb_core['direction'].astype(str).str.casefold() == 'outbound']
+        .groupby('entity_id')['value_zar']
+        .sum()
+        .rename('cross_border_outbound_total_zar')
+    )
 
     # Exclude memo-tagged rows
     tf_lending_mask = trade_finance_df['memo'].notna()
@@ -170,6 +181,12 @@ def build_client_wallet_baseline(
         tf_core.groupby('entity_id')['value_zar']
         .sum()
         .rename('trade_finance_total_zar')
+    )
+    import_tf_totals = (
+        tf_core.loc[tf_core['direction'].astype(str).str.casefold() == 'import']
+        .groupby('entity_id')['value_zar']
+        .sum()
+        .rename('import_trade_finance_total_zar')
     )
 
     # Combine the removed memo rows from all 3 datasets
@@ -193,13 +210,17 @@ def build_client_wallet_baseline(
         clients
         .merge(tb_totals, on='entity_id', how='left')
         .merge(cb_totals, on='entity_id', how='left')
+        .merge(cb_outbound_totals, on='entity_id', how='left')
         .merge(tf_totals, on='entity_id', how='left')
+        .merge(import_tf_totals, on='entity_id', how='left')
         .merge(lending_totals, on='entity_id', how='left')
     )
 
     value_cols = [
         'txn_banking_total_zar', 'cross_border_total_zar',
-        'trade_finance_total_zar', 'lending_signal_total_zar', 'lending_signal_txn_count'
+        'cross_border_outbound_total_zar', 'trade_finance_total_zar',
+        'import_trade_finance_total_zar', 'lending_signal_total_zar',
+        'lending_signal_txn_count'
     ]
     client_table[value_cols] = client_table[value_cols].fillna(0)
 
@@ -219,6 +240,7 @@ def convert_client_table_to_dashboard_schema(
     calculation_details: dict | None = None,
     missing_data: dict | None = None,
     score_weights: dict | None = None,
+    opportunity_flags: dict | None = None,
 ) -> list:
     """
     Transforms the raw aggregated client DataFrame into the exact JSON schema 
@@ -240,6 +262,7 @@ def convert_client_table_to_dashboard_schema(
         for row in calculation_details.get("missing_rows", [])
     }
     missing_data = missing_data or {}
+    opportunity_flags = opportunity_flags or {}
     score_weights = score_weights or {
         "gap_weight": 0.50,
         "sens_weight": 0.40,
@@ -293,6 +316,9 @@ def convert_client_table_to_dashboard_schema(
                 "investment_banking",
             )
         }
+        flags = opportunity_flags.get(company, {})
+        refinancing = flags.get("refinancing", {})
+        import_gap = flags.get("import_trade_finance_gap", {})
         
         record = {
             "entity_id": str(row['entity_id']),
@@ -307,6 +333,12 @@ def convert_client_table_to_dashboard_schema(
             "syn_global_markets_total_zar": _json_safe(row['cross_border_total_zar']),
             "syn_trade_finance_total_zar": _json_safe(row['trade_finance_total_zar']),
             "syn_lending_ib_total_zar": _json_safe(row['lending_signal_total_zar']),
+            "cross_border_outbound_total_zar": _json_safe(
+                row.get('cross_border_outbound_total_zar')
+            ),
+            "import_trade_finance_total_zar": _json_safe(
+                row.get('import_trade_finance_total_zar')
+            ),
 
             "lending_ib_pct": ib_pct,
             "estimated_total_wallet_zar": estimated_total_wallet,
@@ -317,10 +349,17 @@ def convert_client_table_to_dashboard_schema(
             "company_global_markets_total_zar": _json_safe(row['global_markets']),
             "company_investment_banking_total_zar": _json_safe(row['investment_banking']),
             
-            # TODO: figure out these
-            "refinancing_flag": False,
-            "refinancing_window_days": None,
-            "import_mismatch_flag": bool(row['lending_signal_txn_count'] > 5), # Example logical flag based on data
+            "refinancing_flag": bool(refinancing.get("active", False)),
+            "refinancing_window_days": refinancing.get("window_days"),
+            "refinancing_opportunity": refinancing,
+            "import_mismatch_flag": bool(import_gap.get("active", False)),
+            "import_trade_finance_gap": import_gap,
+            "pillar_breakdown": [
+                {"key": "syn_txn_banking_pct", "label": "Transactional Banking", "value": txn_pct},
+                {"key": "syn_global_markets_pct", "label": "Global Markets", "value": cb_pct},
+                {"key": "syn_trade_finance_pct", "label": "Trade Finance", "value": tf_pct},
+                {"key": "lending_ib_pct", "label": "Lending / IB", "value": ib_pct},
+            ],
             "opportunity_score": round(total_score * 100, 2) if total_score is not None else 0.0,
             "pillar_scores": pillar_scores,
             "confidence": confidence,
@@ -349,6 +388,174 @@ def convert_client_table_to_dashboard_schema(
         formatted_records.append(record)
         
     return formatted_records
+
+
+def derive_opportunity_flags(
+    client_table: pd.DataFrame,
+    external: pd.DataFrame,
+    sens: pd.DataFrame,
+    *,
+    as_of_date: date | str | None = None,
+    import_coverage_threshold: float = IMPORT_TRADE_FINANCE_COVERAGE_THRESHOLD,
+) -> dict[str, dict]:
+    """Derive auditable refinancing and import/trade-finance opportunity flags.
+
+    Refinancing is active when reported debt enters the next six months, or
+    when a SENS refinancing event has an upcoming completion date. Import gaps
+    compare explicit/observed import-payment activity with captured import
+    trade-finance business.
+    """
+    as_of = pd.Timestamp(as_of_date or date.today()).normalize()
+    latest_external = _latest_external_rows(external)
+    sens_rows = sens.copy() if isinstance(sens, pd.DataFrame) else pd.DataFrame()
+    results = {}
+
+    for _, client in client_table.iterrows():
+        company = str(client.get("entity_name", ""))
+        external_row = latest_external.get(company, {})
+        refinancing = _derive_refinancing_flag(company, external_row, sens_rows, as_of)
+        import_gap = _derive_import_gap_flag(
+            client,
+            external_row,
+            import_coverage_threshold,
+        )
+        results[company] = {
+            "refinancing": refinancing,
+            "import_trade_finance_gap": import_gap,
+        }
+    return results
+
+
+def _latest_external_rows(external: pd.DataFrame) -> dict[str, dict]:
+    if not isinstance(external, pd.DataFrame) or external.empty or "company" not in external:
+        return {}
+    rows = external.copy()
+    rows["_flag_report_date"] = pd.to_datetime(
+        rows.get("report_date"), errors="coerce"
+    )
+    rows = rows.sort_values("_flag_report_date", na_position="first")
+    return {
+        str(row["company"]): row.to_dict()
+        for _, row in rows.drop_duplicates("company", keep="last").iterrows()
+    }
+
+
+def _derive_refinancing_flag(company, external_row, sens, as_of):
+    candidates = []
+    report_date = pd.to_datetime(external_row.get("report_date"), errors="coerce")
+    if not pd.isna(report_date):
+        for field, years, label in (
+            ("debt_due_within_12_months", 1, "Debt reported due within 12 months"),
+            ("debt_due_12_to_24_months", 2, "Debt reported due in 12 to 24 months"),
+        ):
+            amount = _positive_number(external_row.get(field))
+            if amount is None:
+                continue
+            maturity = report_date.normalize() + pd.DateOffset(years=years)
+            days = int((maturity - as_of).days)
+            if 0 <= days <= REFINANCING_WINDOW_DAYS:
+                candidates.append({
+                    "window_days": days,
+                    "target_date": maturity.date().isoformat(),
+                    "amount": amount,
+                    "currency": _text_or_none(external_row.get("reporting_currency")),
+                    "source": "financial_statements",
+                    "reason": f"{label}; its reporting window ends {maturity.date().isoformat()}.",
+                })
+
+    if not sens.empty and {"company", "event_type"}.issubset(sens.columns):
+        company_events = sens[
+            (sens["company"].astype(str).str.casefold() == company.casefold())
+            & (sens["event_type"].astype(str).str.casefold() == "refinancing")
+        ]
+        for _, event in company_events.iterrows():
+            completion = pd.to_datetime(event.get("expected_completion_date"), errors="coerce")
+            announcement = pd.to_datetime(event.get("announcement_date"), errors="coerce")
+            target = completion
+            if pd.isna(target) and not pd.isna(announcement):
+                target = announcement.normalize() + timedelta(days=90)
+            if pd.isna(target):
+                continue
+            days = int((target.normalize() - as_of).days)
+            if 0 <= days <= REFINANCING_WINDOW_DAYS:
+                candidates.append({
+                    "window_days": days,
+                    "target_date": target.date().isoformat(),
+                    "amount": _positive_number(event.get("event_value")),
+                    "currency": _text_or_none(event.get("currency")),
+                    "source": "sens",
+                    "reason": _text_or_none(event.get("title")) or "Upcoming refinancing event disclosed on SENS.",
+                })
+
+    if not candidates:
+        return {
+            "active": False,
+            "window_days": None,
+            "target_date": None,
+            "amount": None,
+            "currency": None,
+            "source": None,
+            "reason": "No debt maturity or upcoming SENS refinancing falls within the next six months.",
+        }
+    selected = min(candidates, key=lambda item: item["window_days"])
+    return {"active": True, **selected}
+
+
+def _derive_import_gap_flag(client, external_row, threshold):
+    outbound = _positive_number(client.get("cross_border_outbound_total_zar")) or 0.0
+    captured = _positive_number(client.get("import_trade_finance_total_zar")) or 0.0
+    disclosed_imports = _positive_number(external_row.get("imports_value"))
+    imports_exposure = _text_or_none(external_row.get("imports_exposure"))
+    reporting_currency = _text_or_none(external_row.get("reporting_currency"))
+    if disclosed_imports is not None and reporting_currency == "ZAR":
+        import_signal = disclosed_imports
+        signal_source = "disclosed imports value"
+    else:
+        import_signal = outbound
+        signal_source = (
+            "observed outbound cross-border payments"
+            if outbound > 0
+            else "disclosed imports exposure"
+        )
+    has_import_evidence = import_signal > 0 or bool(imports_exposure)
+    coverage = captured / import_signal if import_signal > 0 else None
+    active = bool(has_import_evidence and (coverage is None or coverage < threshold))
+    gap = max(import_signal - captured, 0.0) if import_signal > 0 else None
+    if active:
+        coverage_text = "no measurable" if coverage is None else f"{coverage * 100:.1f}%"
+        reason = (
+            f"{signal_source.capitalize()} indicate import activity, while captured import "
+            f"trade finance covers {coverage_text} of that signal (threshold: {threshold * 100:.0f}%)."
+        )
+    elif has_import_evidence:
+        reason = (
+            f"Captured import trade finance meets the {threshold * 100:.0f}% coverage threshold."
+        )
+    else:
+        reason = "No explicit or observed import-payment activity is available."
+    return {
+        "active": active,
+        "import_signal_zar": import_signal if import_signal > 0 else None,
+        "captured_import_trade_finance_zar": captured,
+        "estimated_gap_zar": gap,
+        "coverage_pct": round(coverage * 100, 2) if coverage is not None else None,
+        "coverage_threshold_pct": round(threshold * 100, 2),
+        "source": signal_source if has_import_evidence else None,
+        "reason": reason,
+    }
+
+
+def _positive_number(value):
+    value = _number_or_none(value)
+    return value if value is not None and value > 0 else None
+
+
+def _text_or_none(value):
+    value = _json_safe(value)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text and text.casefold() not in {"nan", "none", "null", "[]"} else None
 
 def _score_detail(row, pillar: str, weights: dict) -> dict:
     prefix = f"{pillar}_"

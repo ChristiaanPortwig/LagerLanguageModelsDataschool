@@ -1,12 +1,14 @@
 import json
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
 from backend.scripts.data_aggregation import (
     convert_client_table_to_dashboard_schema,
+    derive_opportunity_flags,
     save_dashboard_clients_to_json,
 )
 
@@ -70,6 +72,64 @@ class DashboardAggregationTests(unittest.TestCase):
         )
         self.assertEqual(record["missing_data"]["fields"], ["cost_of_sales"])
         self.assertIn("formula", record["score_calculation"])
+
+    def test_flags_use_upcoming_debt_and_import_trade_coverage(self):
+        clients = pd.DataFrame([{
+            "entity_id": "E01",
+            "entity_name": "Example Ltd",
+            "cross_border_outbound_total_zar": 1_000.0,
+            "import_trade_finance_total_zar": 50.0,
+        }])
+        external = pd.DataFrame([{
+            "company": "Example Ltd",
+            "report_date": "2025-12-31",
+            "debt_due_within_12_months": 500.0,
+            "debt_due_12_to_24_months": None,
+            "imports_value": None,
+            "imports_exposure": None,
+        }])
+
+        flags = derive_opportunity_flags(
+            clients,
+            external,
+            pd.DataFrame(),
+            as_of_date=date(2026, 8, 16),
+        )["Example Ltd"]
+
+        self.assertTrue(flags["refinancing"]["active"])
+        self.assertEqual(flags["refinancing"]["window_days"], 137)
+        self.assertTrue(flags["import_trade_finance_gap"]["active"])
+        self.assertEqual(flags["import_trade_finance_gap"]["coverage_pct"], 5.0)
+        self.assertEqual(flags["import_trade_finance_gap"]["estimated_gap_zar"], 950.0)
+
+    def test_flags_clear_after_windows_and_coverage_threshold_are_met(self):
+        clients = pd.DataFrame([{
+            "entity_id": "E01",
+            "entity_name": "Example Ltd",
+            "cross_border_outbound_total_zar": 1_000.0,
+            "import_trade_finance_total_zar": 250.0,
+        }])
+        external = pd.DataFrame([{
+            "company": "Example Ltd",
+            "report_date": "2024-01-01",
+            "debt_due_within_12_months": 500.0,
+        }])
+        sens = pd.DataFrame([{
+            "company": "Example Ltd",
+            "event_type": "refinancing",
+            "announcement_date": "2025-01-01",
+            "expected_completion_date": "2025-03-01",
+        }])
+
+        flags = derive_opportunity_flags(
+            clients,
+            external,
+            sens,
+            as_of_date=date(2026, 8, 16),
+        )["Example Ltd"]
+
+        self.assertFalse(flags["refinancing"]["active"])
+        self.assertFalse(flags["import_trade_finance_gap"]["active"])
 
     def test_json_writer_emits_strict_complete_json(self):
         with tempfile.TemporaryDirectory() as directory:
