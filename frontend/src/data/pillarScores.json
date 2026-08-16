@@ -1,0 +1,22 @@
+[
+  {"entity_id":"E11","entity_name":"Pepkor Holdings","transactional_banking_score":0.13437141920390894,"global_markets_score":0.1181878458878785,"investment_banking_score":0.060594864345262386,"total_score":0.12146814668888545},
+  {"entity_id":"E01","entity_name":"BHP Group","transactional_banking_score":0.12018610872666335,"global_markets_score":0.1568506267154131,"investment_banking_score":0.06871254073413714,"total_score":0.13492953748654632},
+  {"entity_id":"E08","entity_name":"Sanlam","transactional_banking_score":0.1281640066638584,"global_markets_score":0.10484946559695117,"investment_banking_score":0.04391259761006654,"total_score":0.11463444834878966},
+  {"entity_id":"E10","entity_name":"Bid Corporation","transactional_banking_score":0.13607856548982666,"global_markets_score":0.10077708861759928,"investment_banking_score":0.1281516458207525,"total_score":0.13461949442367674},
+  {"entity_id":"E16","entity_name":"MTN Group","transactional_banking_score":0.12608521917441295,"global_markets_score":0.08581108544838317,"investment_banking_score":0.12530503223816175,"total_score":0.11933332362399598},
+  {"entity_id":"E03","entity_name":"Anglo American","transactional_banking_score":0.11043339243082193,"global_markets_score":0.0817075653064046,"investment_banking_score":0.11746349229807426,"total_score":0.10849917789832082},
+  {"entity_id":"E09","entity_name":"Shoprite Holdings","transactional_banking_score":0.10165801850025263,"global_markets_score":0.06459701612854171,"investment_banking_score":0.09952425810074847,"total_score":0.09798938142886368},
+  {"entity_id":"E02","entity_name":"Glencore","transactional_banking_score":0.29480264934208456,"global_markets_score":0.2682617404767521,"investment_banking_score":0.14658339764744524,"total_score":0.2815480623222142},
+  {"entity_id":"E18","entity_name":"The Bidvest Group","transactional_banking_score":0.09053860849789325,"global_markets_score":0.05208746038990396,"investment_banking_score":0.10060929979554672,"total_score":0.08647421054864972},
+  {"entity_id":"E19","entity_name":"Aspen Pharmacare","transactional_banking_score":0.087619786314862,"global_markets_score":0.07449326957721193,"investment_banking_score":0.0845072567068563,"total_score":0.08542053388792328},
+  {"entity_id":"E04","entity_name":"AngloGold Ashanti","transactional_banking_score":0.0832374469533267,"global_markets_score":0.05781946894741313,"investment_banking_score":0.10166740294241308,"total_score":0.07446437456327062},
+  {"entity_id":"E05","entity_name":"Gold Fields","transactional_banking_score":0.06400249542281207,"global_markets_score":0.03855396852431001,"investment_banking_score":0.08365584918590241,"total_score":0.06326945407325857},
+  {"entity_id":"E17","entity_name":"Vodacom Group","transactional_banking_score":0.038507029870536474,"global_markets_score":0.08518497452184726,"investment_banking_score":0.09499967608439638,"total_score":0.05838870451664601},
+  {"entity_id":"E14","entity_name":"Prosus","transactional_banking_score":0.06297973948399645,"global_markets_score":0.09047853270821352,"investment_banking_score":0.13526408236151435,"total_score":0.09183293942441306},
+  {"entity_id":"E15","entity_name":"Naspers","transactional_banking_score":0.062151119878833726,"global_markets_score":0.09326817011085906,"investment_banking_score":0.11418653876825052,"total_score":0.08505041076824495},
+  {"entity_id":"E12","entity_name":"Clicks Group","transactional_banking_score":0.07675376222708243,"global_markets_score":0.10474210038241853,"investment_banking_score":0.10663820312978332,"total_score":0.07848405661022992},
+  {"entity_id":"E07","entity_name":"OUTsurance Group","transactional_banking_score":0.05782868546111139,"global_markets_score":0.10657155460265705,"investment_banking_score":0.12271318273637091,"total_score":0.057990151820178755},
+  {"entity_id":"E06","entity_name":"Valterra Platinum","transactional_banking_score":0.06728704695804563,"global_markets_score":0.10719534990045737,"investment_banking_score":0.08272735693243857,"total_score":0.06869213540893336},
+  {"entity_id":"E13","entity_name":"NEPI Rockcastle","transactional_banking_score":0.053984199876260186,"global_markets_score":0.07378616844958198,"investment_banking_score":0.07629968204881024,"total_score":0.06740126052433645},
+  {"entity_id":"E20","entity_name":"Shaftesbury Capital plc","transactional_banking_score":0.05333069952341034,"global_markets_score":0.08477654770720267,"investment_banking_score":0.05648364051306883,"total_score":0.05966782722513597}
+]

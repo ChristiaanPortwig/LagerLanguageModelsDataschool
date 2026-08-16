@@ -218,7 +218,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 #Custom
-data/
+/data/
 *.pdf
 *.csv
 
@@ -229,3 +229,6 @@ data/*
 *.csv
 *.parquet
 backend/.env
+
+# Submission notebook data
+submission_code/data/

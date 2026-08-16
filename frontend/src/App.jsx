@@ -1,15 +1,6 @@
 import { Component, useEffect, useState } from 'react'
-import {
-  CartesianGrid,
-  Legend,
-  ResponsiveContainer,
-  Scatter,
-  ScatterChart,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts'
 import { API_ROOT, apiRequest } from './api'
+import pillarScoresData from './data/pillarScores.json'
 import {
   ConfidenceBadge,
   ConfidenceDetails,
@@ -21,27 +12,6 @@ import {
 } from './features'
 import { formatFieldName, overallConfidence } from './featureFormat'
 import { formatPercent, formatScore, formatZarAbbreviated, formatZarFull } from './format'
-
-// Categorical palette, slots 1-2 - Standard Bank blue + a warm complement,
-// re-validated for scatter/all-pairs use with the dataviz skill's
-// validate_palette.js (six-checks, both modes), mirroring the CSS tokens in
-// index.css. refinancing_flag has only two values so it stays within the
-// palette's validated series cap for scatter charts (sector, at 7 values,
-// would exceed it).
-//
-// Recharts fills are plain SVG attributes, not CSS - they can't read the
-// --accent/--series-2 custom properties the rest of the app uses, so the
-// same two color steps are duplicated here per theme and picked by
-// OpportunityHeatmap by the resolved theme (see useTheme below), instead of
-// being computed once at module load like before the toggle existed.
-const REFI_COLORS = {
-  dark: { true: '#c9682f', false: '#2f8fe0' }, // slot 2 terracotta, slot 1 blue
-  light: { true: '#c1622e', false: '#005199' },
-}
-const CHART_INK = {
-  dark: { grid: '#2c2c2a', axis: '#898781', surface: '#1a1a19' },
-  light: { grid: '#e1e0d9', axis: '#898781', surface: '#fcfcfb' },
-}
 
 // Keeps a crash in one panel (e.g. a schema mismatch against the API) from
 // unmounting the entire dashboard. Catches render/lifecycle errors in its
@@ -366,79 +336,137 @@ function ClientTable({ clients, onSelectClient, onSelectConfidence, onReportChan
   )
 }
 
-function HeatmapTooltip({ active, payload }) {
-  if (!active || !payload || !payload.length) return null
-  const client = payload[0].payload
-  return (
-    <div className="chart-tooltip">
-      <strong>
-        {client.entity_name} ({client.entity_id})
-      </strong>
-      <div>Sector: {client.sector}</div>
-      <div>Wallet gap: {formatZarAbbreviated(client.wallet_gap_zar)}</div>
-      <div>Opportunity score: {formatScore(client.opportunity_score)}</div>
-      <div>Refinancing flag: {String(client.refinancing_flag)}</div>
-    </div>
-  )
+// Five fixed color stops (bins, not a continuous gradient) spanning green
+// (low) -> amber -> red (high), anchored on three of the design system's own
+// status tokens (--status-good/--status-warning/--status-critical in
+// index.css) rather than invented hues. Each stop's ink was chosen and
+// verified with the dataviz skill's validate_palette.js `contrast(a, b)`
+// export (WCAG ratio) - both the dark ink (#0b0b0b, matches light-mode
+// --text-primary) and light ink (#ffffff, matches dark-mode --text-primary)
+// were checked against every stop and the higher-contrast one kept. This is
+// why bins were used instead of a naive continuous lerp between the amber
+// and red anchors: that lerp passes through a reddish-orange midpoint (around
+// t=0.9-0.95) where NEITHER ink clears the 4.5:1 text-contrast floor (worst
+// measured 4.46:1) - a genuine dead zone, not an eyeballing judgment call.
+// These bins step around that zone; every stop below clears >=4.49:1, most
+// well clear of it. The inks are hardcoded literals rather than
+// var(--text-primary): that token flips per theme, but these backgrounds
+// don't, so the *theme's current* ink would be wrong on some stops in dark
+// mode (e.g. white text on the green stop only has a 3.35:1 ratio).
+const HEAT_STEPS = [
+  { bg: '#0ca30c', text: '#0b0b0b' }, // = --status-good; dark ink 5.87:1
+  { bg: '#6ba911', text: '#0b0b0b' }, // dark ink 6.85:1
+  { bg: '#fab219', text: '#0b0b0b' }, // = --status-warning; dark ink 10.73:1
+  { bg: '#e2621f', text: '#0b0b0b' }, // dark ink 5.62:1
+  { bg: '#d03b3b', text: '#ffffff' }, // = --status-critical; light ink 4.80:1
+]
+
+// Min-max normalizes to [0, 1] over the given population (independent per
+// column - opportunity_score and wallet_gap_zar are on very different
+// scales), then buckets into one of the five verified stops above.
+function heatScale(values) {
+  const finite = values.filter((value) => Number.isFinite(value))
+  const min = finite.length ? Math.min(...finite) : 0
+  const max = finite.length ? Math.max(...finite) : 1
+  const span = max - min
+  return (value) => {
+    const t = Number.isFinite(value) && span > 0 ? (value - min) / span : 0
+    return HEAT_STEPS[Math.min(HEAT_STEPS.length - 1, Math.floor(t * HEAT_STEPS.length))]
+  }
 }
 
-function OpportunityHeatmap({ clients, onSelectClient, compact = false, theme }) {
-  const refinancing = clients.filter((c) => c.refinancing_flag)
-  const notRefinancing = clients.filter((c) => !c.refinancing_flag)
-  const height = compact ? 240 : 480
-  const tickFontSize = compact ? 11 : 12
-  const refiColors = REFI_COLORS[theme]
-  const chartInk = CHART_INK[theme]
+const PILLAR_ROWS = [
+  { key: 'transactional_banking_score', label: 'Transactional Banking' },
+  { key: 'global_markets_score', label: 'Global Markets' },
+  { key: 'investment_banking_score', label: 'Investment Banking' },
+]
+
+// Client x pillar grid: clients as columns (sorted by total_score
+// descending), pillars as rows, plus a Total Score row visually set apart
+// from the three independent pillars since it's a derived summary, not a
+// fourth pillar. Replaces the old score/wallet-gap-per-client grid.
+function PillarHeatmap({ clients, pillarScores, onSelectClient, compact = false }) {
+  const ordered = [...clients].sort((a, b) => {
+    const diff = (pillarScores[b.entity_id]?.total_score ?? 0)
+      - (pillarScores[a.entity_id]?.total_score ?? 0)
+    return diff || a.entity_id.localeCompare(b.entity_id)
+  })
+  const columns = compact ? ordered.slice(0, 6) : ordered
+
+  // Scales are built from every client, not just the visible columns, so a
+  // client's color doesn't shift when the panel expands/collapses. Each
+  // pillar is normalized independently (same principle as the old grid's
+  // per-column normalization), so a narrow real-world spread within one
+  // pillar still uses the full color range.
+  const rowScales = Object.fromEntries(
+    PILLAR_ROWS.map((row) => [
+      row.key,
+      heatScale(clients.map((client) => pillarScores[client.entity_id]?.[row.key])),
+    ]),
+  )
+  const totalScale = heatScale(clients.map((client) => pillarScores[client.entity_id]?.total_score))
+
+  const cell = (client, value, scale) => (
+    <td
+      key={client.entity_id}
+      className={`heatmap-cell${value == null ? ' heatmap-cell-empty' : ''}`}
+      style={value == null ? undefined : { backgroundColor: scale(value).bg, color: scale(value).text }}
+      onClick={() => onSelectClient(client.entity_id)}
+    >
+      {value == null ? '—' : value.toFixed(2)}
+    </td>
+  )
 
   return (
     <>
-      <h2 className="view-heading">Opportunity Heatmap</h2>
+      <h2 className="view-heading">Pillar Score Heatmap</h2>
       {!compact && (
         <p className="view-subtitle">
-          Wallet gap vs. opportunity score, colored by refinancing flag. Click a point for
-          details.
+          Opportunity score per client and pillar, each pillar colored on its own scale -
+          red is highest, green is lowest. Click a column for details.
         </p>
       )}
-      <div className={`panel chart-card ${compact ? 'chart-card-compact' : ''}`}>
-        <ResponsiveContainer width="100%" height={height}>
-          <ScatterChart margin={{ top: 8, right: 16, bottom: 8, left: 8 }}>
-            <CartesianGrid stroke={chartInk.grid} />
-            <XAxis
-              type="number"
-              dataKey="wallet_gap_zar"
-              name="Wallet Gap (ZAR)"
-              stroke={chartInk.axis}
-              tick={{ fontSize: tickFontSize, fill: chartInk.axis }}
-              tickFormatter={(v) => formatZarAbbreviated(v)}
-            />
-            <YAxis
-              type="number"
-              dataKey="opportunity_score"
-              name="Opportunity Score"
-              stroke={chartInk.axis}
-              tick={{ fontSize: tickFontSize, fill: chartInk.axis }}
-            />
-            <Tooltip
-              cursor={{ strokeDasharray: '3 3', stroke: chartInk.axis }}
-              content={<HeatmapTooltip />}
-            />
-            <Legend wrapperStyle={{ fontSize: 12, paddingTop: 8 }} />
-            <Scatter
-              name="Refinancing: false"
-              data={notRefinancing}
-              fill={refiColors.false}
-              onClick={(point) => onSelectClient(point.entity_id)}
-              cursor="pointer"
-            />
-            <Scatter
-              name="Refinancing: true"
-              data={refinancing}
-              fill={refiColors.true}
-              onClick={(point) => onSelectClient(point.entity_id)}
-              cursor="pointer"
-            />
-          </ScatterChart>
-        </ResponsiveContainer>
+      <div className="panel">
+        <div className="table-scroll">
+          <table className={`data-table pillar-heatmap ${compact ? 'data-table-compact' : ''}`}>
+            <thead>
+              <tr>
+                <th className="heatmap-row-label-header">Pillar</th>
+                {columns.map((client) => (
+                  <th
+                    key={client.entity_id}
+                    className="heatmap-client-header"
+                    title={`${client.entity_name} (${client.entity_id}) - ${client.sector}`}
+                    onClick={() => onSelectClient(client.entity_id)}
+                  >
+                    <div className="heatmap-client-id">{client.entity_id}</div>
+                    <div className="heatmap-client-name">{client.entity_name}</div>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {PILLAR_ROWS.map((row) => (
+                <tr key={row.key}>
+                  <td className="heatmap-row-label">{row.label}</td>
+                  {columns.map((client) => cell(
+                    client,
+                    pillarScores[client.entity_id]?.[row.key],
+                    rowScales[row.key],
+                  ))}
+                </tr>
+              ))}
+              <tr className="heatmap-total-row">
+                <td className="heatmap-row-label">Total Score</td>
+                {columns.map((client) => cell(
+                  client,
+                  pillarScores[client.entity_id]?.total_score,
+                  totalScale,
+                ))}
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </>
   )
@@ -1008,6 +1036,15 @@ function App() {
 
   const handleCollapsePanel = () => setFocusedPanel(null)
 
+  // pillarScoresData is a flat array (frontend/src/data/pillarScores.json);
+  // PillarHeatmap expects a lookup keyed by entity_id. Once real per-pillar
+  // scores are wired through /api/dashboard, replace this with the
+  // equivalent derived from each client record instead - PillarHeatmap only
+  // depends on the { [entity_id]: { ...four 0-1 scores } } shape.
+  const pillarScores = Object.fromEntries(
+    pillarScoresData.map((row) => [row.entity_id, row]),
+  )
+
   return (
     <div className="app-shell">
       <Header
@@ -1060,18 +1097,18 @@ function App() {
                   focusedPanel={focusedPanel}
                   onFocus={setFocusedPanel}
                   onCollapse={handleCollapsePanel}
-                  stripTitle="Opportunity Heatmap"
-                  stripStat={`${summary.refinancing_flag_count} refinancing signals`}
+                  stripTitle="Pillar Score Heatmap"
+                  stripStat={`${clients.length} clients`}
                 >
-                  <OpportunityHeatmap
+                  <PillarHeatmap
                     clients={clients}
+                    pillarScores={pillarScores}
                     onSelectClient={
                       focusedPanel === 'heatmap'
                         ? handleSelectClient
                         : () => setFocusedPanel('heatmap')
                     }
                     compact={focusedPanel !== 'heatmap'}
-                    theme={theme}
                   />
                 </DashboardPanel>
 

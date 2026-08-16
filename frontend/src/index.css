@@ -1010,32 +1010,82 @@ select:focus {
    Heatmap
 ------------------------------------------------------------------------ */
 
-.chart-card {
-  padding: 24px 24px 12px;
+/* ---------------------------------------------------------------------
+   Pillar score heatmap grid (client columns x pillar rows)
+   Cell backgrounds are fixed hex literals in App.jsx (HEAT_STEPS), not CSS
+   tokens - they're deliberately theme-invariant (verified text contrast per
+   stop), so nothing here sets color/background on .heatmap-cell itself.
+   Each cell belongs to a different client (column), so hover/click feedback
+   is per-cell, not per-row like a normal data table - the row-level
+   .data-table tbody tr:hover tint is turned off here to avoid implying a
+   whole pillar row is one clickable unit.
+------------------------------------------------------------------------ */
+
+.pillar-heatmap tbody tr:hover {
+  background: transparent;
 }
 
-.chart-card-compact {
-  padding: 16px 16px 8px;
+.pillar-heatmap th,
+.pillar-heatmap td {
+  text-align: center;
+  white-space: nowrap;
 }
 
-.chart-tooltip {
-  background: var(--surface-1);
-  border: 1px solid var(--border-hairline);
-  border-radius: 6px;
-  padding: 10px 12px;
-  font-size: 12px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+.heatmap-row-label-header,
+.heatmap-row-label {
+  text-align: left;
+  color: var(--text-secondary);
 }
 
-.chart-tooltip strong {
-  display: block;
-  margin-bottom: 4px;
-  font-size: 13px;
+.heatmap-client-header {
+  cursor: pointer;
+  min-width: 64px;
+}
+
+.heatmap-client-id {
+  font-weight: 600;
   color: var(--text-primary);
 }
 
-.chart-tooltip div {
-  color: var(--text-secondary);
+.heatmap-client-name {
+  font-size: 11px;
+  color: var(--text-muted);
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin: 0 auto;
+}
+
+.heatmap-client-header:hover .heatmap-client-id,
+.heatmap-client-header:hover .heatmap-client-name {
+  color: var(--accent);
+}
+
+.heatmap-total-row .heatmap-row-label {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.heatmap-total-row td {
+  border-top: 2px solid var(--baseline);
+}
+
+.heatmap-cell {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.heatmap-cell:hover {
+  filter: brightness(1.08);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.heatmap-cell-empty {
+  background: var(--surface-1);
+  color: var(--text-muted);
+  font-weight: 400;
 }
 
 /* ---------------------------------------------------------------------
