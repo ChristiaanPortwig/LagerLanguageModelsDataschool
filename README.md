@@ -2,7 +2,7 @@
 
 FastAPI, scheduled collection/processing, and a React dashboard for corporate-client wallet opportunities.
 
-## Run with Docker
+## Run the backend with Docker
 
 Place the three bank ledgers and persisted pipeline data under `data/`:
 
@@ -20,7 +20,15 @@ Set `GEMINI_API_KEY` in your shell or a root `.env`, then run:
 docker compose up --build
 ```
 
-- Dashboard: `http://localhost:3000`
+In another terminal, start the frontend development server:
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+- Dashboard: `http://localhost:5173`
 - API/OpenAPI: `http://localhost:4000/docs`
 - Health: `http://localhost:4000/health`
 
