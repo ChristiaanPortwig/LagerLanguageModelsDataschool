@@ -14,17 +14,18 @@ import { formatPercent, formatScore, formatZarAbbreviated, formatZarFull } from 
 const API_ROOT = import.meta.env.VITE_API_BASE_URL || 'http://localhost:4000/api'
 const API_BASE = `${API_ROOT}/clients`
 
-// Categorical palette, slots 1-2 (validated for scatter/all-pairs use in the
-// dataviz skill's references/palette.md, mirroring the CSS tokens in
-// index.css). refinancing_flag has only two values so it stays within the
+// Categorical palette, slots 1-2 - Standard Bank blue + a warm complement,
+// re-validated for scatter/all-pairs use with the dataviz skill's
+// validate_palette.js (six-checks, both modes), mirroring the CSS tokens in
+// index.css. refinancing_flag has only two values so it stays within the
 // palette's validated series cap for scatter charts (sector, at 7 values,
 // would exceed it).
 const isDarkMode =
   typeof window !== 'undefined' &&
   window.matchMedia?.('(prefers-color-scheme: dark)').matches
 const REFI_COLORS = {
-  true: isDarkMode ? '#d95926' : '#eb6834', // slot 2, orange
-  false: isDarkMode ? '#3987e5' : '#2a78d6', // slot 1, blue
+  true: isDarkMode ? '#c9682f' : '#c1622e', // slot 2, warm terracotta
+  false: isDarkMode ? '#2f8fe0' : '#005199', // slot 1, Standard Bank blue
 }
 const CHART_INK = {
   grid: isDarkMode ? '#2c2c2a' : '#e1e0d9',
@@ -209,9 +210,9 @@ function OpportunityHeatmap({ clients, onSelectClient, compact = false }) {
 }
 
 const PILLARS = [
-  { key: 'txn_banking_pct', label: 'Transactional Banking' },
-  { key: 'cross_border_pct', label: 'Cross Border' },
-  { key: 'trade_finance_pct', label: 'Trade Finance' },
+  { key: 'syn_txn_banking_pct', label: 'Transactional Banking' },
+  { key: 'syn_global_markets_pct', label: 'Global Markets' },
+  { key: 'syn_trade_finance_pct', label: 'Trade Finance' },
   { key: 'lending_ib_pct', label: 'Lending / IB' },
 ]
 

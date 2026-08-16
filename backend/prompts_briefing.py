@@ -52,9 +52,9 @@ Estimated wallet gap (opportunity size): R{client['wallet_gap_zar']:,.0f}
 Opportunity score (0-100, higher = higher priority): {client['opportunity_score']:.1f}
 
 Pillar breakdown (% of Syn Bank's observed activity with this client):
-- Transactional Banking: {client['txn_banking_pct']:.0f}%
-- Cross Border / FX: {client['cross_border_pct']:.0f}%
-- Trade Finance: {client['trade_finance_pct']:.0f}%
+- Transactional Banking: {client['syn_txn_banking_pct']:.0f}%
+- Global Markets / FX: {client['syn_global_markets_pct']:.0f}%
+- Trade Finance: {client['syn_trade_finance_pct']:.0f}%
 - Lending / Investment Banking: {client['lending_ib_pct']:.0f}%
 
 {refinancing_line}
@@ -113,9 +113,9 @@ if __name__ == "__main__":
         "syn_bank_share_pct": 19.0,
         "wallet_gap_zar": 48_519_000_000,
         "opportunity_score": 88.6,
-        "txn_banking_pct": 40,
-        "cross_border_pct": 20,
-        "trade_finance_pct": 30,
+        "syn_txn_banking_pct": 40,
+        "syn_global_markets_pct": 20,
+        "syn_trade_finance_pct": 30,
         "lending_ib_pct": 10,
         "refinancing_flag": False,
         "refinancing_window_days": None,

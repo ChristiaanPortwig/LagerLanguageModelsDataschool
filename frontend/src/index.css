@@ -1,9 +1,17 @@
 /* ---------------------------------------------------------------------
    Design tokens
-   Sourced from the dataviz skill's reference palette (references/palette.md)
-   so the app chrome and the heatmap chart share one system. Light mode is
-   primary; dark follows prefers-color-scheme using the same validated
-   categorical steps.
+   Brand pass: Standard Bank blue (#005199 primary / #0032A1 secondary-depth)
+   replaces the dataviz skill's default categorical slot 1. The warm
+   categorical partner (--series-2, used for the heatmap's "refinancing:
+   true" series) was re-picked and re-validated against the brand blue with
+   the dataviz skill's validate_palette.js (six-checks, --pairs all, both
+   modes) rather than eyeballed. Light mode is primary — clean white/grey
+   surfaces, bank-platform-appropriate; dark follows prefers-color-scheme
+   with the same blue family lightened for contrast on dark surfaces.
+
+   --header-* tokens are brand chrome: fixed to the primary blue gradient in
+   both modes (a bank's header bar doesn't invert to black), independent of
+   --accent/--accent-secondary which adapt per mode for interactive UI.
 ------------------------------------------------------------------------ */
 
 :root {
@@ -16,9 +24,15 @@
   --baseline: #c3c2b7;
   --border-hairline: rgba(11, 11, 11, 0.1);
 
-  --accent: #2a78d6; /* categorical slot 1 - blue */
-  --accent-wash: rgba(42, 120, 214, 0.08);
-  --series-2: #eb6834; /* categorical slot 2 - orange (refinancing: true) */
+  --accent: #005199; /* Standard Bank blue - categorical slot 1 */
+  --accent-secondary: #0032a1; /* secondary/depth blue - gradients, hover, emphasis */
+  --accent-wash: rgba(0, 81, 153, 0.08);
+  --series-2: #c1622e; /* warm complement - categorical slot 2 (refinancing: true) */
+
+  --header-gradient-start: #005199;
+  --header-gradient-end: #0032a1;
+  --header-text: #ffffff;
+  --header-text-muted: rgba(255, 255, 255, 0.78);
 
   --status-good: #0ca30c;
   --status-warning: #fab219;
@@ -42,9 +56,13 @@
     --baseline: #383835;
     --border-hairline: rgba(255, 255, 255, 0.1);
 
-    --accent: #3987e5;
-    --accent-wash: rgba(57, 135, 229, 0.12);
-    --series-2: #d95926;
+    --accent: #2f8fe0; /* lightened Standard Bank blue for dark surfaces */
+    --accent-secondary: #1a56c4;
+    --accent-wash: rgba(47, 143, 224, 0.12);
+    --series-2: #c9682f;
+
+    /* --header-* intentionally not overridden: the header stays brand blue
+       in both modes. */
 
     --status-warning-ink: #ffd479;
     --status-serious-ink: #ffb499;
@@ -93,8 +111,9 @@ button {
   justify-content: space-between;
   gap: 16px;
   padding: 20px 32px;
-  background: var(--surface-1);
-  border-bottom: 1px solid var(--border-hairline);
+  background: linear-gradient(135deg, var(--header-gradient-start), var(--header-gradient-end));
+  color: var(--header-text);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
 }
 
 .app-title {
@@ -103,7 +122,7 @@ button {
 }
 
 .app-header-meta {
-  color: var(--text-muted);
+  color: var(--header-text-muted);
   font-size: 13px;
   white-space: nowrap;
 }
@@ -545,7 +564,7 @@ button {
 
 .pillar-fill {
   height: 100%;
-  background: var(--accent);
+  background: linear-gradient(90deg, var(--accent), var(--accent-secondary));
   border-radius: 3px;
 }
 
@@ -636,7 +655,7 @@ button {
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 85%, black);
+  background: var(--accent-secondary);
 }
 
 .btn-primary:disabled {

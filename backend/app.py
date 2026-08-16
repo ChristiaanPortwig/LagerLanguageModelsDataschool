@@ -207,13 +207,27 @@ def get_client_calculation(client_id: str):
 
 @app.post("/api/clients/{client_id}/briefing")
 def create_client_briefing(client_id: str):
-    client = _client(client_id)
-    prompt = SYSTEM_INSTRUCTION + "\n\n" + build_briefing_prompt(client)
+    if not _CLIENTS_CACHE:
+        raise HTTPException(status_code=500, detail="Client data cache is empty")
+
     try:
-        output = Gemini_Client().call_gemini_ustructured(prompt=prompt)
-    except Exception as error:
-        LOGGER.exception("Briefing generation failed")
-        raise HTTPException(status_code=502, detail=f"Briefing generation failed: {error}")
+        clients = _CLIENTS_CACHE
+    except Exception as err:
+        print(f"Failed to read client data: {err}")
+        raise HTTPException(status_code=500, detail="Failed to load client data")
+
+    target = client_id.upper()
+    client = next((c for c in clients if c["entity_id"].upper() == target), None)
+
+    if client is None:
+        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found")
+
+    # Sends the built prompt to Gemini and returns its generated response.
+    prompt = build_briefing_prompt(client)
+
+    client = Gemini_Client()
+    output = client.call_gemini_ustructured(prompt=prompt)
+    print(f"Gemini request made\nOutput:\n{output}")
     return {"report": output}
 
 
