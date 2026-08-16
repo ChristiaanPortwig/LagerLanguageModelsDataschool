@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Component, useEffect, useState } from 'react'
 import {
   CartesianGrid,
   Legend,
@@ -39,6 +39,35 @@ const CHART_INK = {
   grid: isDarkMode ? '#2c2c2a' : '#e1e0d9',
   axis: '#898781',
   surface: isDarkMode ? '#1a1a19' : '#fcfcfb',
+}
+
+// Keeps a crash in one panel (e.g. a schema mismatch against the API) from
+// unmounting the entire dashboard. Catches render/lifecycle errors in its
+// subtree only - does not catch errors from event handlers or async code.
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error, info) {
+    console.error(`${this.props.label || 'A panel'} failed to render:`, error, info)
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <p className="state-message state-message-error">
+          {this.props.label || 'This panel'} failed to render ({this.state.error.message}).
+        </p>
+      )
+    }
+    return this.props.children
+  }
 }
 
 function Header({ clientCount, view, onNavigate }) {
@@ -331,7 +360,13 @@ function FlagBadge({ active, variant, activeLabel, inactiveLabel }) {
 function ProactiveFlags({ flags, onSelectClient, compact = false }) {
   const engagementsAll = flags.engagements || []
   const refinancingAll = flags.refinancing
-  const mismatchedAll = flags.import_trade_finance_gaps
+  // The API's import_trade_finance_gaps array carries flat fields
+  // (import_mismatch_flag, wallet_gap_zar) rather than a nested
+  // import_trade_finance_gap object - filter defensively rather than
+  // assume every entry is already flagged.
+  const mismatchedAll = (flags.import_trade_finance_gaps || []).filter(
+    (c) => c.import_mismatch_flag,
+  )
 
   const engagements = compact ? engagementsAll.slice(0, 3) : engagementsAll
   const refinancing = compact ? refinancingAll.slice(0, 3) : refinancingAll
@@ -461,7 +496,7 @@ function ProactiveFlags({ flags, onSelectClient, compact = false }) {
                   <th>Entity Name</th>
                   <th>Sector</th>
                   <th>Status</th>
-                  <th className="numeric">Est. Trade Gap</th>
+                  <th className="numeric">Wallet Gap</th>
                 </tr>
               </thead>
               <tbody>
@@ -470,21 +505,10 @@ function ProactiveFlags({ flags, onSelectClient, compact = false }) {
                     <td className="entity-name">{client.entity_name}</td>
                     <td className="sector">{client.sector}</td>
                     <td>
-                      <FlagBadge
-                        active
-                        variant="serious"
-                        activeLabel={
-                          client.import_trade_finance_gap.coverage_pct == null
-                            ? 'No captured cover'
-                            : `${client.import_trade_finance_gap.coverage_pct}% covered`
-                        }
-                      />
+                      <FlagBadge active variant="serious" activeLabel="Mismatch detected" />
                     </td>
-                    <td
-                      className="numeric"
-                      title={formatZarFull(client.import_trade_finance_gap.estimated_gap_zar)}
-                    >
-                      {formatZarAbbreviated(client.import_trade_finance_gap.estimated_gap_zar)}
+                    <td className="numeric" title={formatZarFull(client.wallet_gap_zar)}>
+                      {formatZarAbbreviated(client.wallet_gap_zar)}
                     </td>
                   </tr>
                 ))}
@@ -835,7 +859,7 @@ function DashboardPanel({
           Collapse ✕
         </button>
       )}
-      {children}
+      <ErrorBoundary label={stripTitle}>{children}</ErrorBoundary>
     </section>
   )
 }
@@ -898,7 +922,7 @@ function App() {
         {error && <p className="state-message">Failed to load clients: {error}</p>}
 
         {!loading && !error && summary && proactiveFlags && (
-          <>
+          <ErrorBoundary key={view} label="This view">
             {view === 'grid' && (
               <div
                 className={`dashboard-grid ${
@@ -906,7 +930,9 @@ function App() {
                 }`}
               >
                 <section className="grid-panel panel-summary">
-                  <PortfolioSummary summary={summary} />
+                  <ErrorBoundary label="Portfolio Summary">
+                    <PortfolioSummary summary={summary} />
+                  </ErrorBoundary>
                 </section>
 
                 <DashboardPanel
@@ -982,7 +1008,7 @@ function App() {
             {view === 'formulas' && <FormulasPage />}
 
             {view === 'settings' && <SettingsPage onClientsChanged={loadDashboard} />}
-          </>
+          </ErrorBoundary>
         )}
       </div>
     </div>
