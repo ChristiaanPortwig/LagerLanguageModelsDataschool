@@ -26,11 +26,16 @@ final_client_table = build_client_wallet_baseline(
 dashboard_json = final_client_table.to_dict(orient='records')
 """
 
-import pandas as pd
 import json
+import math
+import os
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
-from scripts.wallet_size import calculate_total_wallet_size
+import pandas as pd
+
+from backend.scripts.calculate_client_score import calculate_client_score
+from backend.scripts.wallet_size import calculate_total_wallet_size
 
 
 def find_cross_ledger_overlaps(
@@ -208,7 +213,13 @@ def build_client_wallet_baseline(
 
     return client_table.sort_values('syn_bank_observed_total_zar', ascending=False)
 
-def convert_client_table_to_dashboard_schema(client_table: pd.DataFrame) -> list:
+def convert_client_table_to_dashboard_schema(
+    client_table: pd.DataFrame,
+    *,
+    calculation_details: dict | None = None,
+    missing_data: dict | None = None,
+    score_weights: dict | None = None,
+) -> list:
     """
     Transforms the raw aggregated client DataFrame into the exact JSON schema 
     required by the frontend dashboard.
@@ -222,8 +233,18 @@ def convert_client_table_to_dashboard_schema(client_table: pd.DataFrame) -> list
         list of dicts: Clean records matching the dashboard frontend schema.
     """
     formatted_records = []
-
-    print("COLOUMSN:=========================\n\n\n",client_table.columns)
+    calculation_details = calculation_details or {}
+    formulas_by_company = calculation_details.get("formulas", {})
+    missing_rows = {
+        str(row.get("company")): row
+        for row in calculation_details.get("missing_rows", [])
+    }
+    missing_data = missing_data or {}
+    score_weights = score_weights or {
+        "gap_weight": 0.50,
+        "sens_weight": 0.40,
+        "relationship_weight": 0.10,
+    }
     
     for _, row in client_table.iterrows():
         observed_total = float(row['syn_bank_observed_total_zar'])
@@ -237,9 +258,41 @@ def convert_client_table_to_dashboard_schema(client_table: pd.DataFrame) -> list
             txn_pct = cb_pct = tf_pct = ib_pct = 0.0
 
         # (If you have an external total addressable wallet column, swap it in here)
-        estimated_total_wallet = row['total']
-        syn_bank_share = round((observed_total / estimated_total_wallet) * 100, 2) if estimated_total_wallet > 0 else 0.0
-        wallet_gap = max(0.0, estimated_total_wallet - observed_total)
+        estimated_total_wallet = _number_or_none(row.get("total"))
+        syn_bank_share = (
+            round((observed_total / estimated_total_wallet) * 100, 2)
+            if estimated_total_wallet and estimated_total_wallet > 0
+            else 0.0
+        )
+        wallet_gap = (
+            max(0.0, estimated_total_wallet - observed_total)
+            if estimated_total_wallet is not None
+            else None
+        )
+        company = str(row["entity_name"])
+        total_score = _number_or_none(row.get("total_score"))
+        company_formula = formulas_by_company.get(company, {})
+        confidence = {
+            pillar: {
+                "level": _json_safe(row.get(f"{pillar}_confidence")),
+                "reasons": company_formula.get("pillars", {})
+                .get(pillar, {})
+                .get("confidence_reasons", []),
+            }
+            for pillar in (
+                "transactional_banking",
+                "global_markets",
+                "investment_banking",
+            )
+        }
+        pillar_scores = {
+            pillar: _score_detail(row, pillar, score_weights)
+            for pillar in (
+                "transactional_banking",
+                "global_markets",
+                "investment_banking",
+            )
+        }
         
         record = {
             "entity_id": str(row['entity_id']),
@@ -250,50 +303,130 @@ def convert_client_table_to_dashboard_schema(client_table: pd.DataFrame) -> list
             "syn_global_markets_pct": cb_pct,
             "syn_trade_finance_pct": tf_pct,
 
-            "syn_txt_banking_total_zar": row['txn_banking_total_zar'],
-            "syn_global_markets_total_zar":row['cross_border_total_zar'],
-            "syn_trade_finace_total_zar":row['trade_finance_total_zar'],
+            "syn_txn_banking_total_zar": _json_safe(row['txn_banking_total_zar']),
+            "syn_global_markets_total_zar": _json_safe(row['cross_border_total_zar']),
+            "syn_trade_finance_total_zar": _json_safe(row['trade_finance_total_zar']),
+            "syn_lending_ib_total_zar": _json_safe(row['lending_signal_total_zar']),
 
             "lending_ib_pct": ib_pct,
-            "estimated_total_wallet_zar": float(estimated_total_wallet),
+            "estimated_total_wallet_zar": estimated_total_wallet,
             "syn_bank_share_pct": syn_bank_share,
-            "wallet_gap_zar": float(wallet_gap),
+            "wallet_gap_zar": wallet_gap,
 
-            "company_transactional_banking_total_zar": float(row['transactional_banking']),
-            "company_global_markets_total_zar":float(row['global_markets']),
-            "company_investment_banking_total_zar":float(row['investment_banking']),
+            "company_transactional_banking_total_zar": _json_safe(row['transactional_banking']),
+            "company_global_markets_total_zar": _json_safe(row['global_markets']),
+            "company_investment_banking_total_zar": _json_safe(row['investment_banking']),
             
             # TODO: figure out these
             "refinancing_flag": False,
             "refinancing_window_days": None,
             "import_mismatch_flag": bool(row['lending_signal_txn_count'] > 5), # Example logical flag based on data
-            "opportunity_score": round((wallet_gap / 1_000_000_000) * 1.5, 2) # Scaled mock opportunity score
+            "opportunity_score": round(total_score * 100, 2) if total_score is not None else 0.0,
+            "pillar_scores": pillar_scores,
+            "confidence": confidence,
+            "wallet_calculation": company_formula,
+            "score_calculation": {
+                "formula": "wallet-gap-weighted average of the three pillar scores",
+                "weights": score_weights,
+                "total_score_0_to_1": total_score,
+                "pillar_scores": pillar_scores,
+            },
+            "missing_data": {
+                "fields": missing_data.get(company, []),
+                "update_template": missing_rows.get(company),
+            },
         }
+
+        # Compatibility keys consumed by the current React frontend.
+        record.update({
+            "txn_banking_pct": txn_pct,
+            "cross_border_pct": cb_pct,
+            "trade_finance_pct": tf_pct,
+            "syn_txt_banking_total_zar": record["syn_txn_banking_total_zar"],
+            "syn_trade_finace_total_zar": record["syn_trade_finance_total_zar"],
+        })
         
         formatted_records.append(record)
         
     return formatted_records
 
-def save_dashboard_clients_to_json(client_records, output_path="../../data/client_data.json"):
+def _score_detail(row, pillar: str, weights: dict) -> dict:
+    prefix = f"{pillar}_"
+    return {
+        "score": _json_safe(row.get(f"{prefix}score")),
+        "formula": (
+            "gap_weight * gap_score + sens_weight * sens_score + "
+            "relationship_weight * relationship_score"
+        ),
+        "weights": weights,
+        "components": {
+            name: _json_safe(row.get(f"{prefix}{name}"))
+            for name in (
+                "total_wallet",
+                "captured_wallet",
+                "wallet_gap",
+                "gap_score",
+                "raw_sens",
+                "sens_score",
+                "current_wallet_share",
+                "relationship_score",
+            )
+        },
+    }
+
+
+def _number_or_none(value):
+    value = _json_safe(value)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _json_safe(value):
+    if value is None:
+        return None
+    try:
+        if bool(pd.isna(value)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if hasattr(value, "item"):
+        value = value.item()
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def save_dashboard_clients_to_json(
+    client_records,
+    output_path=None,
+):
     """
     Takes the formatted list of client dictionaries and saves them as a pretty-printed 
     JSON file to the specified target path.
     """
     # Resolve the file path relative to the current script's location
-    target_file = Path(__file__).resolve().parent / output_path
-
-    with open(target_file, "w", encoding="utf-8") as f:
-        json.dump(client_records, f, indent=2, ensure_ascii=False)
+    target_file = Path(
+        output_path
+        or Path(__file__).resolve().parents[2] / "data" / "client_data.json"
+    )
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic replace keeps API readers from observing a partially-written file.
+    with NamedTemporaryFile(
+        "w", encoding="utf-8", dir=target_file.parent, delete=False
+    ) as output:
+        json.dump(client_records, output, indent=2, ensure_ascii=False, allow_nan=False)
+        temporary_path = Path(output.name)
+    os.replace(temporary_path, target_file)
         
     print(f"Successfully saved {len(client_records)} client records to {target_file.resolve()}")
 
-def reload_client_data():
-    cross_border_payments = pd.read_csv("../data/cross_border_payments.csv")
-    trade_finance = pd.read_csv("../data/trade_finance.csv")
-    transactional_banking = pd.read_csv("../data/transactional_banking.csv")
+def reload_client_data(data_dir=None):
+    data_dir = Path(data_dir or Path(__file__).resolve().parents[2] / "data")
+    cross_border_payments = pd.read_csv(data_dir / "cross_border_payments.csv")
+    trade_finance = pd.read_csv(data_dir / "trade_finance.csv")
+    transactional_banking = pd.read_csv(data_dir / "transactional_banking.csv")
 
-    company = pd.read_csv("../data/company_lvl_scraped_new.csv")
-    sens = pd.read_csv("../data/sens_scraped_new.csv")
+    company = pd.read_json(data_dir / "json" / "current_external_data.json")
+    sens = pd.read_json(data_dir / "json" / "current_sens_data.json")
     
     print("[data-agg] Loaded csv")
     # Currency casing fix (found during EDA: 'ZAR' vs 'zar')
@@ -312,7 +445,21 @@ def reload_client_data():
     )
     print("[data-agg] final client table")
     
-    df = calculate_total_wallet_size(company_df=company, corporate_events_df=sens)
+    try:
+        df, details, missing = calculate_total_wallet_size(
+            company_df=company,
+            corporate_events_df=sens,
+            return_calculation_details=True,
+            return_missing_data=True,
+        )
+    except ValueError as error:
+        if "currency" not in str(error):
+            raise
+        df, details, missing = calculate_total_wallet_size(
+            company_df=company,
+            return_calculation_details=True,
+            return_missing_data=True,
+        )
 
     print("[data-agg] total wallet")
 
@@ -324,9 +471,27 @@ def reload_client_data():
     )
     print("[data-agg] Merged external wallet data")
 
-    formatted = convert_client_table_to_dashboard_schema(final_client_table)
+    for score_column in (
+        "transactional_banking_opportunity_score",
+        "global_markets_opportunity_score",
+        "investment_banking_opportunity_score",
+    ):
+        if score_column not in sens:
+            sens[score_column] = 0.0
+        sens[score_column] = pd.to_numeric(sens[score_column], errors="coerce").fillna(0)
+    scores = calculate_client_score(final_client_table, sens, df)
+    final_client_table = final_client_table.merge(
+        scores.drop(columns=["entity_name"], errors="ignore"),
+        on="entity_id",
+        how="left",
+    )
+    formatted = convert_client_table_to_dashboard_schema(
+        final_client_table,
+        calculation_details=details,
+        missing_data=missing,
+    )
     print("[data-agg] formatted")
-    save_dashboard_clients_to_json(formatted)
+    save_dashboard_clients_to_json(formatted, data_dir / "client_data.json")
     print("[data-agg] saved to data folder")
 
 # ==========================================

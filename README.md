@@ -1,81 +1,75 @@
-# LagerLanguageModelsDataschool
-Repository for Data School Hackathon for team Lager Language Models
+# Share of Wallet
 
-## Project Setup
-Download the provided csv files and add it to the data directory
+FastAPI, scheduled collection/processing, and a React dashboard for corporate-client wallet opportunities.
 
-The financial-report collector uses Crawl4AI as its browser-rendered fallback,
-and the data processor uses pypdf to merge SENS announcements. Install the
-dependencies and initialise Crawl4AI before running collection or processing:
+## Run with Docker
 
-```bash
-.venv/bin/pip install -U crawl4ai pypdf yfinance
-.venv/bin/crawl4ai-setup
-```
+Place the three bank ledgers and persisted pipeline data under `data/`:
 
-Run the complete processing pipeline from the repository root:
+- `transactional_banking.csv`
+- `cross_border_payments.csv`
+- `trade_finance.csv`
+- `client_data.json`
+- `json/current_external_data.json`
+- `json/current_sens_data.json`
+- `downloads/` (created automatically)
 
-```python
-from backend.scripts.data_processing import Data_Processor
-
-processor = Data_Processor()
-external_df, sens_df = processor.process_data()
-```
-
-To scrape only new documents, retain incremental JSON state, and calculate
-wallet sizes in one run:
+Set `GEMINI_API_KEY` in your shell or a root `.env`, then run:
 
 ```bash
-.venv/bin/python -m backend.scripts.wallet_size_pipeline --scrape all
+docker compose up --build
 ```
 
-Use `--scrape sens` to check only JSE SENS announcements. State and outputs are
-written to `data/json/` (`current_external_data.json`,
-`current_sens_data.json`, `processed_documents.json`, and
-`wallet_sizes.json`). The Python API is `run_wallet_size_pipeline(...)`; it
-returns `(external_df, sens_df, wallet_size_df)` and accepts existing frames as
-`current_sens_data` and `current_external_data`.
+- Dashboard: `http://localhost:3000`
+- API/OpenAPI: `http://localhost:4000/docs`
+- Health: `http://localhost:4000/health`
 
-For an auditable wallet estimate, request the calculation details directly:
+The mounted `data/` directory is the persistent source of truth. SENS collection runs hourly and full investor-document collection runs daily. Override with `SENS_INTERVAL_SECONDS`, `FULL_INTERVAL_SECONDS`, or disable scheduling with `PIPELINE_SCHEDULER_ENABLED=false`.
 
-```python
-wallet_size_df, calculation_json = calculate_total_wallet_size(
-    company_df,
-    corporate_events_df,
-    return_calculation_details=True,
-)
+## Frontend API contract
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/clients` | Dashboard-ready client records |
+| GET | `/api/clients/{id}` | One company with scores, confidence and audit data |
+| GET | `/api/clients/{id}/calculation` | Wallet formulas, score components and low-confidence reasons |
+| POST | `/api/clients/{id}/briefing` | Generate a banker briefing |
+| POST | `/api/assistant` | Ask a portfolio/client question |
+| GET | `/api/missing-data` | Missing PDFs, wallet fields and SENS scores |
+| POST | `/api/clients/{id}/documents?document_type=...&year=...` | Upload and process a PDF (`multipart/form-data`, field `file`) |
+| PATCH | `/api/clients/{id}/missing-data` | Supply missing standardized financial values |
+| PATCH | `/api/opportunities/{record_id}` | Supply missing 0–1 SENS pillar scores |
+| GET | `/api/formulas` | Global scoring formulas and all wallet calculations |
+| PUT | `/api/settings/scoring` | Change the three scoring weights (must sum to 1) |
+| POST | `/api/pipeline/run` | Trigger `{"scope":"sens"}` or `{"scope":"all"}` |
+| GET | `/api/pipeline/status` | Poll scheduled/manual pipeline state |
+
+Financial update body:
+
+```json
+{"values":{"fx_derivative_notional":1250000000}}
 ```
 
-`calculation_json["formulas"]` records each selected product formula, its tier,
-inputs, and the pillar/total rollups. `calculation_json["missing_rows"]`
-contains JSON-safe company-row templates with improvable fields set to `null`;
-populate those fields and merge the rows back into `company_df` for a more
-accurate recalculation.
+Opportunity update body:
 
-`process_data` extracts base-unit values from PDFs, validates available company
-values with yfinance, and converts dated monetary values to ZAR. It now reads
-and updates the checkpoints and document fingerprints in `data/json/`, so only
-unprocessed documents are extracted. `DataCollector.collect_data(...)` is
-scrape-only; incremental selection and dataframe merging belong to
-`Data_Processor.process_new_data(...)`. The wallet pipeline calls
-`prepare_incremental_data(...)` before scraping so caller-supplied current data
-is safely recorded as already processed.
+```json
+{"global_markets_opportunity_score":0.8}
+```
 
-Gemini is instructed to return numeric values in scientific notation and to
-expand source scales such as thousands/millions/billions during extraction.
-Standardized rows retain the source ISO currency in
-`original_currency` alongside `fx_rate_to_zar` and `fx_rate_date`. To
-standardize existing frames without extracting PDFs, use
-`processor.standardize_data(external_df, sens_df)`. Pass
-`fx_as_of_date="YYYY-MM-DD"` when undated foreign-currency rows need a fixed FX
-date.
+The API atomically regenerates `data/client_data.json` after processed documents, financial corrections, opportunity-score corrections, or scoring-weight changes. Existing dashboard field names remain available alongside the richer audit schema.
 
-## Citations
-- OpenAI ChatGPT 5.6 for data collection
-    - Assiting with the writing of data-collection.py. Especially web crawling.
-    - Assisting with generating contant values, especially INVESTOR_URL. This provides us with
-    optimal accuracy for web scraping, rather than trying to manually scrape these.
+## Local development
 
-- OpenAI ChatGPT 5.6 for data processing:
-    - Assists in researching fields to extract.
-    - Writing JSON schemas in gemini_structured_schemas.py from a pre-defined attribute list.
+```bash
+.venv/bin/pip install -r backend/requirements.txt
+.venv/bin/python -m unittest discover -s backend/tests -v
+.venv/bin/uvicorn backend.app:app --reload --port 4000
+```
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+Set `VITE_API_BASE_URL` when the API is not at `http://localhost:4000/api`.

@@ -195,6 +195,9 @@ def calculate_total_wallet_size(
                 "included_products": included_products,
                 "value": _json_safe(record[pillar]),
                 "confidence": record[f"{pillar}_confidence"],
+                "confidence_reasons": _confidence_reasons(
+                    products, estimates, row
+                ),
             }
             missing_keywords = _log_low_confidence(
                 row["company"],
@@ -263,6 +266,30 @@ def calculate_total_wallet_size(
     if return_missing_data:
         return result, missing_data
     return result
+
+
+def _confidence_reasons(
+    products: tuple[str, ...],
+    estimates: dict[str, "_Estimate"],
+    row: pd.Series,
+) -> list[dict[str, Any]]:
+    """Return structured reasons for every non-high-confidence product."""
+    reasons = []
+    for product in products:
+        estimate = estimates[product]
+        if estimate.tier == "A":
+            continue
+        reasons.append({
+            "product": product,
+            "tier": estimate.tier,
+            "status": "unavailable" if estimate.tier is None else "proxy",
+            "missing_fields": [
+                field
+                for field in _PREFERRED_INPUTS.get(product, ())
+                if _value(row, field) is None
+            ],
+        })
+    return reasons
 
 
 def missing_wallet_data_keywords(
