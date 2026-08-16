@@ -8,6 +8,8 @@ VENV_DIR="${REPO_ROOT}/.venv"
 DATA_DIR="${REPO_ROOT}/data"
 JSON_DIR="${DATA_DIR}/json"
 REPORTS_DIR="${DATA_DIR}/reports"
+ENV_EXAMPLE="${REPO_ROOT}/.env.example"
+BACKEND_ENV="${REPO_ROOT}/backend/.env"
 
 # Replace each placeholder with a public Google Drive share URL. The value after
 # the | is the path where the backend expects that JSON file.
@@ -62,6 +64,9 @@ command -v curl >/dev/null 2>&1 || {
   log "curl is required but was not found."
   exit 1
 }
+
+log "Copying ${ENV_EXAMPLE} to ${BACKEND_ENV}..."
+cp -- "${ENV_EXAMPLE}" "${BACKEND_ENV}"
 
 if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
   log "Creating Python virtual environment at ${VENV_DIR}..."
