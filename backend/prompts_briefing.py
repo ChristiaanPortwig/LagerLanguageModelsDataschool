@@ -10,6 +10,10 @@ investment bank. You write short, plain-English briefing notes for coverage bank
 ahead of client meetings. Your notes are based on Syn Bank's internal transaction data 
 and estimated wallet share — never invent facts not present in the data you're given.
 
+Names and internal identifiers in the client data are represented by privacy placeholder
+tokens. Never infer, expand, alter, or replace those tokens. If you refer to an identity,
+copy its placeholder token exactly so the calling system can restore it locally.
+
 Tone: professional, direct, confident. Written for a senior banker who is short on 
 time — no filler, no restating the obvious, no hedging language like "it appears that" 
 or "this may suggest."
@@ -29,6 +33,15 @@ no dashes or underscores as separators. Write plain prose only, as if speaking t
 note aloud."""
 
 
+# These opaque values are sent to Gemini in place of identifying client and employee
+# data. They are deliberately stable so a returned narrative can be re-identified
+# locally without disclosing the replacement map to the model provider.
+CLIENT_NAME_PLACEHOLDER = "[[CLIENT_NAME]]"
+CLIENT_ID_PLACEHOLDER = "[[CLIENT_ID]]"
+MANAGER_NAME_PLACEHOLDER = "[[RELATIONSHIP_MANAGER_NAME]]"
+MANAGER_ID_PLACEHOLDER = "[[RELATIONSHIP_MANAGER_ID]]"
+
+
 def build_briefing_prompt(client: dict) -> str:
     """
     Takes a single client record (matching the shape returned by 
@@ -45,11 +58,18 @@ def build_briefing_prompt(client: dict) -> str:
         if client.get("import_mismatch_flag")
         else "Import/trade finance mismatch: none detected."
     )
+    manager = client.get("relationship_manager", {}) or {}
+    manager_line = (
+        f"Relationship manager: {MANAGER_NAME_PLACEHOLDER}"
+        f" ({manager.get('title', 'Relationship manager')}, "
+        f"{MANAGER_ID_PLACEHOLDER})."
+    )
 
     return f"""Write a briefing note for the following client, using only the data below.
 
-Client: {client['entity_name']} ({client['entity_id']})
+Client: {CLIENT_NAME_PLACEHOLDER} ({CLIENT_ID_PLACEHOLDER})
 Sector: {client['sector']}
+{manager_line}
 Estimated total banking wallet: R{client['estimated_total_wallet_zar']:,.0f}
 Syn Bank's current share of wallet: {client['syn_bank_share_pct']:.1f}%
 Estimated wallet gap (opportunity size): R{client['wallet_gap_zar']:,.0f}
@@ -65,44 +85,20 @@ Pillar breakdown (% of Syn Bank's observed activity with this client):
 {mismatch_line}
 """
 
-def build_assistant_prompt(question: str, all_clients: list[dict], focused_entity_id: str | None = None) -> str:
-    """
-    Builds the prompt for the global assistant. Includes a compact summary of every 
-    client (for portfolio-wide questions) and, if the banker currently has a client 
-    open on screen, that client's full record for extra context.
-    """
-    portfolio_lines = "\n".join(
-        f"- {c['entity_name']} ({c['entity_id']}, {c['sector']}): "
-        f"wallet R{c['estimated_total_wallet_zar']:,.0f}, "
-        f"Syn Bank share {c['syn_bank_share_pct']:.1f}%, "
-        f"gap R{c['wallet_gap_zar']:,.0f}, "
-        f"opportunity score {c['opportunity_score']:.1f}, "
-        f"refinancing={'yes, ' + str(c['refinancing_window_days']) + 'd' if c.get('refinancing_flag') else 'no'}, "
-        f"import mismatch={'yes' if c.get('import_mismatch_flag') else 'no'}"
-        for c in all_clients
-    )
 
-    focus_block = ""
-    if focused_entity_id:
-        focused = next((c for c in all_clients if c["entity_id"] == focused_entity_id), None)
-        if focused:
-            focus_block = (
-                f"\n\nThe banker currently has {focused['entity_name']} ({focused['entity_id']}) "
-                f"open on screen. If the question is ambiguous about which client it refers to, "
-                f"assume they mean this one."
-            )
-
-    return f"""A banker at Syn Bank is using a dashboard covering these 20 corporate clients:
-
-{portfolio_lines}
-{focus_block}
-
-Answer this question using only the data above. If the answer isn't determinable from 
-this data, say so plainly rather than guessing. Keep the answer conversational and 
-concise — a few sentences, not a report.
-
-Question: {question}
-"""
+def restore_briefing_placeholders(narrative: str, client: dict) -> str:
+    """Restore private identities in a Gemini narrative inside our trust boundary."""
+    manager = client.get("relationship_manager", {}) or {}
+    replacements = {
+        CLIENT_NAME_PLACEHOLDER: str(client.get("entity_name") or "Unnamed client"),
+        CLIENT_ID_PLACEHOLDER: str(client.get("entity_id") or "No client ID"),
+        MANAGER_NAME_PLACEHOLDER: str(manager.get("name") or "Unassigned"),
+        MANAGER_ID_PLACEHOLDER: str(manager.get("employee_id") or "No employee ID"),
+    }
+    restored = str(narrative)
+    for placeholder, private_value in replacements.items():
+        restored = restored.replace(placeholder, private_value)
+    return restored
 
 
 if __name__ == "__main__":

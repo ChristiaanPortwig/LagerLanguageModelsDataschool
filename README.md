@@ -44,8 +44,9 @@ The mounted `data/` directory is the persistent source of truth. SENS collection
 | GET | `/api/clients/{id}/calculation` | Wallet formulas, score components and low-confidence reasons |
 | GET | `/api/payment-timing` | All client cash cycles, payment timing and Gemini engagement predictions |
 | GET | `/api/clients/{id}/payment-timing` | Cash cycle, payment timing and engagement prediction for one client |
-| POST | `/api/clients/{id}/briefing` | Generate a banker briefing |
-| POST | `/api/assistant` | Ask a portfolio/client question |
+| GET | `/api/clients/{id}/report` | Check whether a current client report exists |
+| POST | `/api/clients/{id}/report` | Generate and persist a client report |
+| GET | `/api/clients/{id}/report/download` | Download the current report as print-ready HTML |
 | GET | `/api/missing-data` | Missing PDFs, wallet fields and automatic SENS-processing status |
 | POST | `/api/clients/{id}/documents?document_type=...&year=...` | Upload and process a PDF (`multipart/form-data`, field `file`) |
 | PATCH | `/api/clients/{id}/missing-data` | Supply missing standardized financial values |
@@ -70,6 +71,12 @@ Opportunity update body:
 The API atomically regenerates `data/client_data.json` after processed documents, financial corrections, opportunity-score corrections, or scoring-weight changes. Existing dashboard field names remain available alongside the richer audit schema.
 
 Every newly scraped SENS document is extracted and its opportunity scores are completed by Gemini in the same pipeline run. A run is marked failed if Gemini is unavailable or leaves any SENS row unscored; incomplete SENS scores are not exposed as manual frontend data-entry work.
+
+The conversational AI assistant is not exposed. Gemini remains scoped to document/SENS processing, timing intelligence, and explicit client-report generation. Generated reports are stored under `data/reports/` and include a separate formula-methodology page. A source fingerprint invalidates and deletes an existing report whenever its client data, timing intelligence, formulas, or relationship-manager assignment changes.
+
+For report generation, client and relationship-manager names and internal identifiers are replaced with opaque placeholders before the prompt is sent to Gemini. The returned narrative is re-identified locally before the report is persisted, so the provider never receives the replacement map.
+
+Relationship ownership uses `data/json/relationship_managers.json` when present and otherwise falls back to the bundled `backend/config/relationship_managers.json`. The bundled entries are explicitly marked mock assignments and use `.invalid` email addresses; this JSON adapter can later be replaced by an internal relationship database.
 
 Opportunity flags are calculated by the backend during every regeneration:
 

@@ -27,6 +27,7 @@ from backend.scripts.data_aggregation import (
 from backend.scripts.data_collection import DataCollector
 from backend.scripts.data_processing import Data_Processor
 from backend.scripts.payment_cycles_timing import build_client_timing_intelligence
+from backend.scripts.report_service import ReportService
 from backend.scripts.wallet_size import calculate_total_wallet_size
 
 
@@ -283,6 +284,7 @@ class PipelineService:
         }
         for record in records:
             record["timing_intelligence"] = timing_by_entity.get(record["entity_id"])
+        invalidated_reports = ReportService(self.data_dir).invalidate_stale(records)
         save_dashboard_clients_to_json(records, self.client_path)
         self._write_json(
             self.details_path,
@@ -292,6 +294,7 @@ class PipelineService:
                 "wallet": details,
                 "missing_data_keywords": missing,
                 "timing_generated_at": timing_payload.get("generated_at"),
+                "invalidated_reports": invalidated_reports,
             },
         )
         return records

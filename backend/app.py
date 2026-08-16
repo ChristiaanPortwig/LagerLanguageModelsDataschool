@@ -18,22 +18,25 @@ from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.requests import Request
 from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, model_validator
 
 from backend.prompts_briefing import (
     SYSTEM_INSTRUCTION,
-    build_assistant_prompt,
     build_briefing_prompt,
+    restore_briefing_placeholders,
 )
 from backend.scripts.gemini_client import Gemini_Client
 from backend.scripts.pipeline_service import (
     PipelineBusyError,
     PipelineService,
 )
+from backend.scripts.report_service import ReportService
 
 
 LOGGER = logging.getLogger(__name__)
 SERVICE = PipelineService()
+REPORTS = ReportService(SERVICE.data_dir)
 _EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="data-pipeline")
 
 
@@ -68,11 +71,6 @@ class ScoreWeightUpdate(BaseModel):
         if not self.model_dump(exclude_none=True):
             raise ValueError("At least one scoring setting is required")
         return self
-
-
-class AssistantRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=2000)
-    focused_entity_id: str | None = None
 
 
 async def _scheduled_loop(scope: Literal["sens", "all"], interval_seconds: int):
@@ -188,7 +186,7 @@ def _clients() -> list[dict]:
         raise HTTPException(status_code=503, detail=f"Client data is unavailable: {error}")
     if not isinstance(clients, list) or not clients:
         raise HTTPException(status_code=503, detail="Client data is empty")
-    return clients
+    return [REPORTS.enrich_relationship(client) for client in clients]
 
 
 def _client(client_id: str) -> dict:
@@ -202,6 +200,19 @@ def _client(client_id: str) -> dict:
     )
     if client is None:
         raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found")
+    try:
+        timing = SERVICE.timing_intelligence()
+        current_timing = next(
+            (
+                item for item in timing.get("clients", [])
+                if str(item.get("entity_id", "")).casefold() == target
+            ),
+            client.get("timing_intelligence"),
+        )
+        client = {**client, "timing_intelligence": current_timing}
+    except Exception:
+        LOGGER.exception("Client response could not load the latest payment timing")
+    client["report"] = REPORTS.status(client)
     return client
 
 
@@ -266,6 +277,10 @@ def _dashboard_payload() -> dict:
         )
         for client in clients
     )
+    clients = [
+        {**client, "report": REPORTS.status(client)}
+        for client in clients
+    ]
     count = len(clients)
     details = SERVICE._read_json(SERVICE.details_path, {})
     return {
@@ -381,30 +396,45 @@ def get_client_payment_timing(client_id: str):
     }
 
 
-@app.post("/api/clients/{client_id}/briefing")
-def create_client_briefing(client_id: str):
+@app.get("/api/clients/{client_id}/report")
+def get_client_report(client_id: str):
+    client = _client(client_id)
+    return REPORTS.status(client)
+
+
+@app.post("/api/clients/{client_id}/report")
+def create_client_report(client_id: str):
     client = _client(client_id)
     prompt = build_briefing_prompt(client)
-
-    output = Gemini_Client().call_gemini_ustructured(
-        prompt=prompt, system_instruction=SYSTEM_INSTRUCTION
-    )
-    return {"report": output}
-
-
-@app.post("/api/assistant")
-def ask_assistant(payload: AssistantRequest):
-    prompt = SYSTEM_INSTRUCTION + "\n\n" + build_assistant_prompt(
-        payload.question,
-        _clients(),
-        payload.focused_entity_id,
-    )
     try:
-        output = Gemini_Client().call_gemini_ustructured(prompt=prompt)
+        private_narrative = Gemini_Client().call_gemini_ustructured(
+            prompt=prompt,
+            system_instruction=SYSTEM_INSTRUCTION,
+        )
     except Exception as error:
-        LOGGER.exception("Assistant request failed")
-        raise HTTPException(status_code=502, detail=f"Assistant request failed: {error}")
-    return {"answer": output}
+        LOGGER.exception("Report generation failed")
+        raise HTTPException(status_code=502, detail=f"Report generation failed: {error}")
+    narrative = restore_briefing_placeholders(private_narrative, client)
+    return REPORTS.generate(client, narrative)
+
+
+@app.post("/api/clients/{client_id}/briefing", include_in_schema=False)
+def create_client_briefing_compatibility(client_id: str):
+    """Backward-compatible alias for the persisted report generator."""
+    return create_client_report(client_id)
+
+
+@app.get("/api/clients/{client_id}/report/download")
+def download_client_report(client_id: str):
+    client = _client(client_id)
+    path = REPORTS.download_path(client)
+    if path is None:
+        raise HTTPException(status_code=404, detail="No current report is available")
+    return FileResponse(
+        path,
+        media_type="text/html; charset=utf-8",
+        filename=path.name,
+    )
 
 
 @app.get("/api/pipeline/status")

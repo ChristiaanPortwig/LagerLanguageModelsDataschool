@@ -1,0 +1,26 @@
+{
+  "directory_name": "Mock relationship directory",
+  "is_mock": true,
+  "assignments": {
+    "E01": {"employee_id": "RM-MOCK-001", "name": "Lerato Mokoena", "title": "Senior Relationship Manager", "email": "lerato.mokoena@example.invalid"},
+    "E02": {"employee_id": "RM-MOCK-002", "name": "Ayesha Patel", "title": "Senior Relationship Manager", "email": "ayesha.patel@example.invalid"},
+    "E03": {"employee_id": "RM-MOCK-003", "name": "Sibusiso Ndlovu", "title": "Relationship Manager", "email": "sibusiso.ndlovu@example.invalid"},
+    "E04": {"employee_id": "RM-MOCK-004", "name": "Megan Jacobs", "title": "Relationship Manager", "email": "megan.jacobs@example.invalid"},
+    "E05": {"employee_id": "RM-MOCK-001", "name": "Lerato Mokoena", "title": "Senior Relationship Manager", "email": "lerato.mokoena@example.invalid"},
+    "E06": {"employee_id": "RM-MOCK-003", "name": "Sibusiso Ndlovu", "title": "Relationship Manager", "email": "sibusiso.ndlovu@example.invalid"},
+    "E07": {"employee_id": "RM-MOCK-005", "name": "Daniel van Wyk", "title": "Senior Relationship Manager", "email": "daniel.vanwyk@example.invalid"},
+    "E08": {"employee_id": "RM-MOCK-005", "name": "Daniel van Wyk", "title": "Senior Relationship Manager", "email": "daniel.vanwyk@example.invalid"},
+    "E09": {"employee_id": "RM-MOCK-004", "name": "Megan Jacobs", "title": "Relationship Manager", "email": "megan.jacobs@example.invalid"},
+    "E10": {"employee_id": "RM-MOCK-002", "name": "Ayesha Patel", "title": "Senior Relationship Manager", "email": "ayesha.patel@example.invalid"},
+    "E11": {"employee_id": "RM-MOCK-004", "name": "Megan Jacobs", "title": "Relationship Manager", "email": "megan.jacobs@example.invalid"},
+    "E12": {"employee_id": "RM-MOCK-005", "name": "Daniel van Wyk", "title": "Senior Relationship Manager", "email": "daniel.vanwyk@example.invalid"},
+    "E13": {"employee_id": "RM-MOCK-002", "name": "Ayesha Patel", "title": "Senior Relationship Manager", "email": "ayesha.patel@example.invalid"},
+    "E14": {"employee_id": "RM-MOCK-003", "name": "Sibusiso Ndlovu", "title": "Relationship Manager", "email": "sibusiso.ndlovu@example.invalid"},
+    "E15": {"employee_id": "RM-MOCK-003", "name": "Sibusiso Ndlovu", "title": "Relationship Manager", "email": "sibusiso.ndlovu@example.invalid"},
+    "E16": {"employee_id": "RM-MOCK-001", "name": "Lerato Mokoena", "title": "Senior Relationship Manager", "email": "lerato.mokoena@example.invalid"},
+    "E17": {"employee_id": "RM-MOCK-001", "name": "Lerato Mokoena", "title": "Senior Relationship Manager", "email": "lerato.mokoena@example.invalid"},
+    "E18": {"employee_id": "RM-MOCK-004", "name": "Megan Jacobs", "title": "Relationship Manager", "email": "megan.jacobs@example.invalid"},
+    "E19": {"employee_id": "RM-MOCK-002", "name": "Ayesha Patel", "title": "Senior Relationship Manager", "email": "ayesha.patel@example.invalid"},
+    "E20": {"employee_id": "RM-MOCK-005", "name": "Daniel van Wyk", "title": "Senior Relationship Manager", "email": "daniel.vanwyk@example.invalid"}
+  }
+}
