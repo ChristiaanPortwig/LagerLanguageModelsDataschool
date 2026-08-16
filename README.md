@@ -42,9 +42,11 @@ The mounted `data/` directory is the persistent source of truth. SENS collection
 | GET | `/api/clients` | Dashboard-ready client records |
 | GET | `/api/clients/{id}` | One company with scores, confidence and audit data |
 | GET | `/api/clients/{id}/calculation` | Wallet formulas, score components and low-confidence reasons |
+| GET | `/api/payment-timing` | All client cash cycles, payment timing and Gemini engagement predictions |
+| GET | `/api/clients/{id}/payment-timing` | Cash cycle, payment timing and engagement prediction for one client |
 | POST | `/api/clients/{id}/briefing` | Generate a banker briefing |
 | POST | `/api/assistant` | Ask a portfolio/client question |
-| GET | `/api/missing-data` | Missing PDFs, wallet fields and SENS scores |
+| GET | `/api/missing-data` | Missing PDFs, wallet fields and automatic SENS-processing status |
 | POST | `/api/clients/{id}/documents?document_type=...&year=...` | Upload and process a PDF (`multipart/form-data`, field `file`) |
 | PATCH | `/api/clients/{id}/missing-data` | Supply missing standardized financial values |
 | PATCH | `/api/opportunities/{record_id}` | Supply missing 0–1 SENS pillar scores |
@@ -67,12 +69,16 @@ Opportunity update body:
 
 The API atomically regenerates `data/client_data.json` after processed documents, financial corrections, opportunity-score corrections, or scoring-weight changes. Existing dashboard field names remain available alongside the richer audit schema.
 
+Every newly scraped SENS document is extracted and its opportunity scores are completed by Gemini in the same pipeline run. A run is marked failed if Gemini is unavailable or leaves any SENS row unscored; incomplete SENS scores are not exposed as manual frontend data-entry work.
+
 Opportunity flags are calculated by the backend during every regeneration:
 
 - Refinancing is flagged when disclosed debt enters a 180-day maturity window or an upcoming SENS refinancing completion falls inside that window.
 - Import/trade finance is flagged when captured import trade finance covers less than 10% of disclosed imports or observed outbound cross-border payment activity.
 
 Each client record includes the supporting dates, amounts, coverage and human-readable reason used by the frontend.
+
+Cash-cycle intelligence is calculated from the three bank ledgers during backend aggregation. Gemini receives only the calculated timing evidence and returns a structured engagement date, priority, rationale and action. If Gemini is unavailable, the API labels and returns the notebook-derived rules fallback. Set `TIMING_TIMEZONE` (default `Africa/Johannesburg`) to control the business-date boundary; the scheduler refreshes recommendations immediately on startup when due and at midnight when a recommended contact date arrives.
 
 ## Local development
 

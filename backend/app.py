@@ -9,8 +9,10 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -86,16 +88,61 @@ async def _scheduled_loop(scope: Literal["sens", "all"], interval_seconds: int):
             LOGGER.exception("Scheduled %s pipeline failed", scope)
 
 
+def _timing_timezone() -> ZoneInfo:
+    name = os.getenv("TIMING_TIMEZONE", "Africa/Johannesburg")
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        LOGGER.warning("Unknown TIMING_TIMEZONE %s; falling back to UTC", name)
+        return ZoneInfo("UTC")
+
+
+async def _timing_refresh_loop():
+    """Refresh recommendations at startup and every local business-date boundary."""
+    business_timezone = _timing_timezone()
+    force_refresh = False
+    while True:
+        now = datetime.now(business_timezone)
+        if SERVICE.status()["running"]:
+            await asyncio.sleep(60)
+            continue
+        loop = asyncio.get_running_loop()
+        try:
+            payload = await loop.run_in_executor(
+                _EXECUTOR,
+                lambda: SERVICE.timing_intelligence(
+                    reference_date=now.date().isoformat(),
+                    force=force_refresh,
+                ),
+            )
+        except Exception:
+            LOGGER.exception("Scheduled client-timing refresh failed")
+            await asyncio.sleep(300)
+            continue
+        if (
+            os.getenv("GEMINI_API_KEY")
+            and payload.get("prediction_mode") not in {"gemini", "not_applicable"}
+        ):
+            force_refresh = True
+            await asyncio.sleep(int(os.getenv("TIMING_GEMINI_RETRY_SECONDS", "300")))
+            continue
+        force_refresh = False
+        after_refresh = datetime.now(business_timezone)
+        tomorrow = (after_refresh + timedelta(days=1)).date()
+        next_midnight = datetime.combine(tomorrow, datetime.min.time(), business_timezone)
+        await asyncio.sleep(max(1.0, (next_midnight - after_refresh).total_seconds()))
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    tasks = []
+    tasks = [asyncio.create_task(_timing_refresh_loop())]
     if os.getenv("PIPELINE_SCHEDULER_ENABLED", "true").lower() in {"1", "true", "yes"}:
         sens_interval = int(os.getenv("SENS_INTERVAL_SECONDS", "3600"))
         full_interval = int(os.getenv("FULL_INTERVAL_SECONDS", "86400"))
-        tasks = [
+        tasks.extend([
             asyncio.create_task(_scheduled_loop("sens", sens_interval)),
             asyncio.create_task(_scheduled_loop("all", full_interval)),
-        ]
+        ])
         LOGGER.info(
             "Pipeline scheduler enabled: SENS every %ss, full scrape every %ss",
             sens_interval,
@@ -160,6 +207,23 @@ def _client(client_id: str) -> dict:
 
 def _dashboard_payload() -> dict:
     clients = _clients()
+    try:
+        timing_payload = SERVICE.timing_intelligence()
+        timing_by_entity = {
+            str(item.get("entity_id")): item
+            for item in timing_payload.get("clients", [])
+        }
+        clients = [
+            {
+                **client,
+                "timing_intelligence": timing_by_entity.get(
+                    str(client.get("entity_id")), client.get("timing_intelligence")
+                ),
+            }
+            for client in clients
+        ]
+    except Exception:
+        LOGGER.exception("Dashboard could not load the latest payment timing")
     numeric = lambda value: float(value) if isinstance(value, (int, float)) else 0.0
     refinancing = sorted(
         (client for client in clients if client.get("refinancing_flag")),
@@ -171,6 +235,36 @@ def _dashboard_payload() -> dict:
             client.get("import_trade_finance_gap", {}).get("estimated_gap_zar")
         ),
         reverse=True,
+    )
+    priority_order = {"Immediate": 0, "High": 1, "Medium": 2, "Low": 3}
+    engagements = sorted(
+        (client for client in clients if client.get("timing_intelligence")),
+        key=lambda client: (
+            not bool(
+                client.get("timing_intelligence", {})
+                .get("engagement_prediction", {})
+                .get("engage_now")
+            ),
+            priority_order.get(
+                client.get("timing_intelligence", {})
+                .get("engagement_prediction", {})
+                .get("engagement_priority"),
+                4,
+            ),
+            client.get("timing_intelligence", {})
+            .get("engagement_prediction", {})
+            .get("recommended_engagement_date")
+            or "9999-12-31",
+            -numeric(client.get("opportunity_score")),
+        ),
+    )
+    engage_now_count = sum(
+        bool(
+            client.get("timing_intelligence", {})
+            .get("engagement_prediction", {})
+            .get("engage_now")
+        )
+        for client in clients
     )
     count = len(clients)
     details = SERVICE._read_json(SERVICE.details_path, {})
@@ -191,9 +285,11 @@ def _dashboard_payload() -> dict:
             ),
             "refinancing_flag_count": len(refinancing),
             "import_trade_finance_gap_count": len(import_gaps),
-            "total_flag_count": len(refinancing) + len(import_gaps),
+            "engage_now_count": engage_now_count,
+            "total_flag_count": len(refinancing) + len(import_gaps) + engage_now_count,
         },
         "proactive_flags": {
+            "engagements": engagements,
             "refinancing": refinancing,
             "import_trade_finance_gaps": import_gaps,
         },
@@ -249,6 +345,39 @@ def get_client_calculation(client_id: str):
         "wallet_calculation": client.get("wallet_calculation", {}),
         "score_calculation": client.get("score_calculation", {}),
         "missing_data": client.get("missing_data", {}),
+    }
+
+
+@app.get("/api/payment-timing")
+def get_payment_timing():
+    """Return cash cycles, payment timing, and engagement predictions for all clients."""
+    try:
+        return SERVICE.timing_intelligence()
+    except (FileNotFoundError, ValueError) as error:
+        raise HTTPException(status_code=503, detail=f"Payment timing is unavailable: {error}")
+
+
+@app.get("/api/clients/{client_id}/payment-timing")
+def get_client_payment_timing(client_id: str):
+    client = _client(client_id)
+    try:
+        timing = SERVICE.timing_intelligence()
+    except (FileNotFoundError, ValueError) as error:
+        raise HTTPException(status_code=503, detail=f"Payment timing is unavailable: {error}")
+    result = next(
+        (
+            item
+            for item in timing.get("clients", [])
+            if str(item.get("entity_id", "")).casefold() == client["entity_id"].casefold()
+        ),
+        None,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Payment timing for '{client_id}' not found")
+    return {
+        **result,
+        "generated_at": timing.get("generated_at"),
+        "generated_for_date": timing.get("generated_for_date"),
     }
 
 

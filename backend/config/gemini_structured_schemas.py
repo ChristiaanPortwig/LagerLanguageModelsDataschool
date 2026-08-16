@@ -684,3 +684,30 @@ class DocumentFilenameValidationResponse(BaseModel):
         default_factory=list,
         description="Exactly one validation result for every supplied document."
     )
+
+
+class ClientEngagementPrediction(BaseModel):
+    """Gemini's engagement recommendation for one client payment cycle."""
+
+    entity_id: str = Field(
+        description="Client entity identifier exactly as supplied in the prompt."
+    )
+    recommended_engagement_date: str = Field(
+        description="Recommended engagement date in ISO 8601 YYYY-MM-DD format."
+    )
+    engagement_priority: Literal["Immediate", "High", "Medium", "Low"]
+    rationale: str = Field(
+        description="A concise explanation grounded only in the supplied timing evidence."
+    )
+    recommended_action: str = Field(
+        description="A concise, product-specific action for the relationship manager."
+    )
+
+
+class ClientEngagementPredictionsResponse(BaseModel):
+    """Structured engagement recommendations for supplied client cycles."""
+
+    predictions: List[ClientEngagementPrediction] = Field(
+        default_factory=list,
+        description="Exactly one engagement prediction per supplied client with a payment cycle."
+    )

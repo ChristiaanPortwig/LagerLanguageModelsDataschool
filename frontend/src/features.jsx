@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { apiRequest } from './api'
 import { formatFieldName } from './featureFormat'
 import { formatZarAbbreviated, formatZarFull } from './format'
@@ -276,51 +276,6 @@ export function WalletCalculation({ calculation }) {
   )
 }
 
-function OpportunityScoreForm({ record, onSaved, onCancel }) {
-  const [values, setValues] = useState({})
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState(null)
-  const missing = new Set(record.missing_fields || [])
-
-  const handleSubmit = async (event) => {
-    event.preventDefault()
-    const payload = Object.fromEntries(
-      Object.entries(values).filter(([, value]) => value !== '').map(([key, value]) => [key, Number(value)])
-    )
-    if (!Object.keys(payload).length) {
-      setError('Enter at least one score.')
-      return
-    }
-    setSaving(true)
-    setError(null)
-    try {
-      await apiRequest(`/opportunities/${record.record_id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-      onSaved?.()
-    } catch (requestError) {
-      setError(requestError.message)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <form className="inline-form" onSubmit={handleSubmit}>
-      {[...missing].map((key) => (
-        <label key={key}>{formatFieldName(key.replace(/_opportunity_score$/, ''))}<input type="number" min="0" max="1" step="0.01" value={values[key] || ''} onChange={(event) => setValues({ ...values, [key]: event.target.value })} /></label>
-      ))}
-      <div className="form-actions">
-        <button className="btn-primary" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save scores'}</button>
-        <button className="btn-secondary" type="button" onClick={onCancel}>Cancel</button>
-      </div>
-      <StatusMessage error={error} />
-    </form>
-  )
-}
-
 function PipelineControls() {
   const [status, setStatus] = useState(null)
   const [error, setError] = useState(null)
@@ -356,6 +311,16 @@ function PipelineControls() {
         <button className="btn-secondary" type="button" disabled={status?.running} onClick={() => run('all')}>Refresh all sources</button>
       </div>
       {status?.last_completed_at && <p className="view-subtitle">Last completed {new Date(status.last_completed_at).toLocaleString('en-ZA')}.</p>}
+      {status?.sens_scoring?.state === 'running' && (
+        <p className="view-subtitle">
+          Gemini is scoring {status.sens_scoring.rows_submitted} SENS row{status.sens_scoring.rows_submitted === 1 ? '' : 's'}…
+        </p>
+      )}
+      {status?.sens_scoring?.state === 'complete' && status.sens_scoring.rows_submitted > 0 && (
+        <p className="view-subtitle">
+          Gemini completed {status.sens_scoring.rows_submitted} SENS score{status.sens_scoring.rows_submitted === 1 ? '' : 's'}.
+        </p>
+      )}
       <StatusMessage error={error || status?.error} />
     </section>
   )
@@ -366,7 +331,6 @@ export function DataQualityPage({ clients, onClientsChanged }) {
   const [error, setError] = useState(null)
   const [uploading, setUploading] = useState(null)
   const [editingWallet, setEditingWallet] = useState(null)
-  const [editingOpportunity, setEditingOpportunity] = useState(null)
 
   const load = () => apiRequest('/missing-data').then(setData).catch((requestError) => setError(requestError.message))
   useEffect(() => { load() }, [])
@@ -377,7 +341,7 @@ export function DataQualityPage({ clients, onClientsChanged }) {
   return (
     <>
       <h2 className="view-heading">Data Gaps</h2>
-      <p className="view-subtitle">Missing documents and model inputs that reduce calculation confidence.</p>
+      <p className="view-subtitle">Missing documents and financial inputs that reduce calculation confidence. SENS data is processed automatically by Gemini.</p>
       <PipelineControls />
       <section className="panel detail-section">
         <h2>Missing PDFs</h2>
@@ -398,24 +362,19 @@ export function DataQualityPage({ clients, onClientsChanged }) {
       <section className="panel detail-section">
         <h2>Missing Wallet Inputs</h2>
         <div className="table-scroll"><table className="data-table"><thead><tr><th>Company</th><th className="numeric">Missing fields</th><th>Action</th></tr></thead><tbody>
-          {data.wallet_fields.map((record) => <tr key={record.entity_id}><td className="entity-name">{record.company}</td><td className="numeric">{record.fields.length}</td><td><button type="button" className="text-button" onClick={() => setEditingWallet(editingWallet === record.entity_id ? null : record.entity_id)}>Add data</button></td></tr>)}
+          {data.wallet_fields.map((record) => (
+            <Fragment key={record.entity_id}>
+              <tr><td className="entity-name">{record.company}</td><td className="numeric">{record.fields.length}</td><td><button type="button" className="text-button" onClick={() => setEditingWallet(editingWallet === record.entity_id ? null : record.entity_id)}>Add data</button></td></tr>
+              {editingWallet === record.entity_id && (
+                <tr className="inline-editor-row">
+                  <td className="inline-editor-cell" colSpan="3">
+                    <div className="nested-form"><h3 className="subsection-title">Add data for {record.company}</h3><ManualDataForm entityId={record.entity_id} fields={record.fields} onCancel={() => setEditingWallet(null)} onSaved={() => { setEditingWallet(null); load(); onClientsChanged?.() }} /></div>
+                  </td>
+                </tr>
+              )}
+            </Fragment>
+          ))}
         </tbody></table></div>
-        {editingWallet && (() => {
-          const record = data.wallet_fields.find((item) => item.entity_id === editingWallet)
-          return record ? <div className="nested-form"><h3 className="subsection-title">Add data for {record.company}</h3><ManualDataForm entityId={record.entity_id} fields={record.fields} onCancel={() => setEditingWallet(null)} onSaved={() => { setEditingWallet(null); load(); onClientsChanged?.() }} /></div> : null
-        })()}
-      </section>
-      <section className="panel detail-section">
-        <h2>Missing Opportunity Scores</h2>
-        {!data.opportunity_scores.length ? <p>No SENS scores are missing.</p> : (
-          <div className="table-scroll"><table className="data-table"><thead><tr><th>Company</th><th>Announcement</th><th className="numeric">Missing scores</th><th>Action</th></tr></thead><tbody>
-            {data.opportunity_scores.map((record) => <tr key={record.record_id}><td className="entity-name">{record.company}</td><td>{record.title || record.announcement_date || 'Untitled announcement'}</td><td className="numeric">{record.missing_fields.length}</td><td><button type="button" className="text-button" onClick={() => setEditingOpportunity(editingOpportunity === record.record_id ? null : record.record_id)}>Add scores</button></td></tr>)}
-          </tbody></table></div>
-        )}
-        {editingOpportunity && (() => {
-          const record = data.opportunity_scores.find((item) => item.record_id === editingOpportunity)
-          return record ? <div className="nested-form"><OpportunityScoreForm record={record} onCancel={() => setEditingOpportunity(null)} onSaved={() => { setEditingOpportunity(null); load(); onClientsChanged?.() }} /></div> : null
-        })()}
       </section>
     </>
   )
@@ -474,26 +433,5 @@ export function SettingsPage({ onClientsChanged }) {
         <StatusMessage error={error} success={success} />
       </form></section>
     </>
-  )
-}
-
-export function AssistantBar({ focusedEntityId }) {
-  const [question, setQuestion] = useState('')
-  const [answer, setAnswer] = useState(null)
-  const [error, setError] = useState(null)
-  const [loading, setLoading] = useState(false)
-  const submit = async (event) => {
-    event.preventDefault(); if (!question.trim()) return
-    setLoading(true); setError(null); setAnswer(null)
-    try {
-      const result = await apiRequest('/assistant', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: question.trim(), focused_entity_id: focusedEntityId || null }) })
-      setAnswer(result.answer)
-    } catch (requestError) { setError(requestError.message) } finally { setLoading(false) }
-  }
-  return (
-    <div className="assistant-wrap">
-      <form className="assistant-bar" onSubmit={submit}><input aria-label="Ask the portfolio assistant" placeholder={focusedEntityId ? 'Ask about this client…' : 'Ask about the portfolio…'} value={question} onChange={(event) => setQuestion(event.target.value)} /><button type="submit" className="btn-primary" disabled={loading}>{loading ? 'Thinking…' : 'Ask'}</button></form>
-      {(answer || error) && <div className={`assistant-answer ${error ? 'state-message-error' : ''}`}><button type="button" aria-label="Close answer" onClick={() => { setAnswer(null); setError(null) }}>×</button>{error || answer}</div>}
-    </div>
   )
 }

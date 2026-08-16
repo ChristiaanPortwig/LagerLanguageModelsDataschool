@@ -9,9 +9,8 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { apiRequest } from './api'
+import { API_ROOT, apiRequest } from './api'
 import {
-  AssistantBar,
   ConfidenceBadge,
   ConfidenceDetails,
   DataQualityPage,
@@ -99,16 +98,72 @@ function PortfolioSummary({ summary }) {
               {formatZarAbbreviated(summary.total_wallet_gap_zar)}
             </div>
           </div>
+          <div>
+            <div className="stat-label">Engage Now</div>
+            <div className="stat-value accent">{summary.engage_now_count || 0}</div>
+          </div>
         </div>
       </div>
     </>
   )
 }
 
-function ClientTable({ clients, onSelectClient, onSelectConfidence, compact = false }) {
-  const rows = compact
-    ? [...clients].sort((a, b) => b.opportunity_score - a.opportunity_score).slice(0, 6)
-    : clients
+function ReportAction({ client, onChanged }) {
+  const [report, setReport] = useState(client.report || { available: false })
+  const [generating, setGenerating] = useState(false)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    setReport(client.report || { available: false })
+  }, [client.report])
+
+  const generate = async (event) => {
+    event.stopPropagation()
+    setGenerating(true)
+    setError(null)
+    try {
+      const status = await apiRequest(`/clients/${client.entity_id}/report`, {
+        method: 'POST',
+      })
+      setReport(status)
+      onChanged?.()
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  if (report.available) {
+    return (
+      <a
+        className="btn-secondary report-action"
+        href={`${API_ROOT}/clients/${client.entity_id}/report/download`}
+        download={report.filename}
+        onClick={(event) => event.stopPropagation()}
+        title={report.generated_at ? `Generated ${new Date(report.generated_at).toLocaleString('en-ZA')}` : ''}
+      >
+        Download report
+      </a>
+    )
+  }
+
+  return (
+    <span className="report-action-wrap">
+      <button type="button" className="btn-primary report-action" onClick={generate} disabled={generating}>
+        {generating ? 'Generating…' : 'Generate report'}
+      </button>
+      {error && <span className="report-action-error" title={error}>Failed</span>}
+    </span>
+  )
+}
+
+function ClientTable({ clients, onSelectClient, onSelectConfidence, onReportChanged, compact = false }) {
+  const orderedClients = [...clients].sort(
+    (a, b) => (b.opportunity_score || 0) - (a.opportunity_score || 0)
+      || a.entity_id.localeCompare(b.entity_id),
+  )
+  const rows = compact ? orderedClients.slice(0, 6) : orderedClients
 
   return (
     <>
@@ -125,11 +180,15 @@ function ClientTable({ clients, onSelectClient, onSelectConfidence, compact = fa
               <tr>
                 <th>Entity ID</th>
                 <th>Entity Name</th>
+                <th>Relationship Manager</th>
                 <th>Sector</th>
                 <th className="numeric">{compact ? 'Wallet' : 'Est. Total Wallet'}</th>
                 <th className="numeric">{compact ? 'Syn. Share' : 'Synthetic Bank Share'}</th>
                 <th className="numeric">{compact ? 'Score' : 'Opportunity Score'}</th>
+                {!compact && <th>Next Payment</th>}
+                {!compact && <th>Engage</th>}
                 <th>Confidence</th>
+                <th>Report</th>
               </tr>
             </thead>
             <tbody>
@@ -137,6 +196,7 @@ function ClientTable({ clients, onSelectClient, onSelectConfidence, compact = fa
                 <tr key={client.entity_id} onClick={() => onSelectClient(client.entity_id)}>
                   <td>{client.entity_id}</td>
                   <td className="entity-name">{client.entity_name}</td>
+                  <td>{client.relationship_manager?.name || 'Unassigned'}</td>
                   <td className="sector">{client.sector}</td>
                   <td
                     className="numeric"
@@ -146,6 +206,19 @@ function ClientTable({ clients, onSelectClient, onSelectConfidence, compact = fa
                   </td>
                   <td className="numeric">{formatPercent(client.syn_bank_share_pct)}</td>
                   <td className="numeric">{formatScore(client.opportunity_score)}</td>
+                  {!compact && (
+                    <td>{formatTimingDate(client.timing_intelligence?.payment_timing?.predicted_payment_date)}</td>
+                  )}
+                  {!compact && (
+                    <td>
+                      {client.timing_intelligence?.engagement_prediction?.engage_now
+                        ? <span className="badge badge-serious">Engage now</span>
+                        : formatTimingDate(
+                          client.timing_intelligence?.engagement_prediction
+                            ?.recommended_engagement_date,
+                        )}
+                    </td>
+                  )}
                   <td>
                     <ConfidenceBadge
                       level={overallConfidence(client.confidence)}
@@ -154,6 +227,9 @@ function ClientTable({ clients, onSelectClient, onSelectConfidence, compact = fa
                         onSelectConfidence(client.entity_id, 'confidence')
                       }}
                     />
+                  </td>
+                  <td>
+                    <ReportAction client={client} onChanged={onReportChanged} />
                   </td>
                 </tr>
               ))}
@@ -253,9 +329,11 @@ function FlagBadge({ active, variant, activeLabel, inactiveLabel }) {
 }
 
 function ProactiveFlags({ flags, onSelectClient, compact = false }) {
+  const engagementsAll = flags.engagements || []
   const refinancingAll = flags.refinancing
   const mismatchedAll = flags.import_trade_finance_gaps
 
+  const engagements = compact ? engagementsAll.slice(0, 3) : engagementsAll
   const refinancing = compact ? refinancingAll.slice(0, 3) : refinancingAll
   const mismatched = compact ? mismatchedAll.slice(0, 3) : mismatchedAll
 
@@ -267,6 +345,52 @@ function ProactiveFlags({ flags, onSelectClient, compact = false }) {
           Clients that need outreach this week - sorted by urgency, not alphabetically.
         </p>
       )}
+
+      <h3 className="section-heading">
+        Payment &amp; Engagement Timing
+        {compact && engagementsAll.length > engagements.length && (
+          <span className="section-heading-count">
+            {' '}
+            · next {engagements.length} of {engagementsAll.length}
+          </span>
+        )}
+      </h3>
+      <div className="panel">
+        {engagements.length === 0 ? (
+          <p className="state-message">No payment timing is currently available.</p>
+        ) : (
+          <div className="table-scroll">
+            <table className={`data-table ${compact ? 'data-table-compact' : ''}`}>
+              <thead>
+                <tr>
+                  <th>Entity Name</th>
+                  <th>Engagement</th>
+                  <th>Next Payment</th>
+                  {!compact && <th>Strategy</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {engagements.map((client) => {
+                  const timing = client.timing_intelligence || {}
+                  const engagement = timing.engagement_prediction || {}
+                  return (
+                    <tr key={client.entity_id} onClick={() => onSelectClient(client.entity_id)}>
+                      <td className="entity-name">{client.entity_name}</td>
+                      <td>
+                        {engagement.engage_now ? (
+                          <span className="badge badge-serious">Engage now</span>
+                        ) : formatTimingDate(engagement.recommended_engagement_date)}
+                      </td>
+                      <td>{formatTimingDate(timing.payment_timing?.predicted_payment_date)}</td>
+                      {!compact && <td>{timing.payment_timing?.strategy || 'General Coverage'}</td>}
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
       <h3 className="section-heading">
         Refinancing Opportunities
@@ -373,47 +497,92 @@ function ProactiveFlags({ flags, onSelectClient, compact = false }) {
   )
 }
 
-function BriefingReport({ entityId }) {
-  const [report, setReport] = useState(null)
-  const [error, setError] = useState(null)
-  const [loading, setLoading] = useState(false)
+function formatTimingDate(value) {
+  if (!value) return 'Not available'
+  return new Date(`${value}T00:00:00`).toLocaleDateString('en-ZA', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+  })
+}
 
-  const handleGenerate = () => {
-    setLoading(true)
-    setError(null)
-    setReport(null)
-    apiRequest(`/clients/${entityId}/briefing`, { method: 'POST' })
-      .then((data) => setReport(data.report))
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false))
+function TimingIntelligence({ timing, error }) {
+  if (error && !timing) {
+    return <p className="state-message state-message-inline state-message-error">{error}</p>
+  }
+  if (!timing) {
+    return <p className="state-message state-message-inline">No payment timing is available.</p>
   }
 
-  return (
-    <section className="panel detail-section">
-      <h2>Briefing Report</h2>
-      <button
-        type="button"
-        className="btn-primary"
-        onClick={handleGenerate}
-        disabled={loading}
-      >
-        {loading ? 'Generating…' : 'Generate Report'}
-      </button>
+  const cashIn = timing.cash_cycle?.cash_in || {}
+  const cashOut = timing.cash_cycle?.cash_out || {}
+  const payment = timing.payment_timing || {}
+  const engagement = timing.engagement_prediction || {}
+  const windowText = (cycle) => cycle.peak_day == null
+    ? 'Not available'
+    : `Day ${cycle.window_start_day}–${cycle.window_end_day}`
 
-      {loading && <p className="state-message state-message-inline">Generating report...</p>}
-      {error && (
-        <p className="state-message state-message-inline state-message-error">
-          Failed to generate report: {error}
-        </p>
-      )}
-      {report && !loading && !error && <p className="report-text">{report}</p>}
-    </section>
+  return (
+    <>
+      <div className="timing-grid">
+        <div className="timing-card">
+          <div className="stat-label">Cash-in cycle</div>
+          <div className="timing-value">{windowText(cashIn)}</div>
+          <p>
+            Peak day {cashIn.peak_day ?? '—'} · {cashIn.confidence_pct == null
+              ? 'No confidence estimate'
+              : `${formatPercent(cashIn.confidence_pct)} of value in window`}
+          </p>
+        </div>
+        <div className="timing-card">
+          <div className="stat-label">Cash-out cycle</div>
+          <div className="timing-value">{windowText(cashOut)}</div>
+          <p>
+            Peak day {cashOut.peak_day ?? '—'} · {cashOut.confidence_pct == null
+              ? 'No confidence estimate'
+              : `${formatPercent(cashOut.confidence_pct)} of value in window`}
+          </p>
+        </div>
+        <div className="timing-card">
+          <div className="stat-label">Next predicted payment</div>
+          <div className="timing-value">{formatTimingDate(payment.predicted_payment_date)}</div>
+          <p>
+            {payment.strategy || 'General Coverage'} · {payment.confidence_band || 'Low'} confidence
+          </p>
+        </div>
+      </div>
+
+      <div className={`engagement-callout ${engagement.engage_now ? 'engagement-callout-now' : ''}`}>
+        <div className="engagement-heading">
+          <div>
+            <div className="stat-label">
+              {engagement.generated_by === 'gemini' ? 'Gemini engagement prediction' : 'Engagement prediction'}
+            </div>
+            <div className="timing-value">
+              {engagement.engage_now
+                ? 'Engage now'
+                : formatTimingDate(engagement.recommended_engagement_date)}
+            </div>
+          </div>
+          <span className={`badge ${engagement.engage_now ? 'badge-serious' : 'badge-neutral'}`}>
+            {engagement.engagement_priority || 'Low'} priority
+          </span>
+        </div>
+        <p>{engagement.rationale}</p>
+        <strong>{engagement.recommended_action}</strong>
+        {engagement.generated_by === 'rules_fallback' && (
+          <small>Rules fallback shown because a Gemini prediction was not available.</small>
+        )}
+      </div>
+    </>
   )
 }
 
 function ClientDetail({ entityId, onBack, initialSection, onClientChanged }) {
   const [client, setClient] = useState(null)
   const [calculation, setCalculation] = useState(null)
+  const [timing, setTiming] = useState(null)
+  const [timingError, setTimingError] = useState(null)
   const [missingDocuments, setMissingDocuments] = useState([])
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -425,14 +594,20 @@ function ClientDetail({ entityId, onBack, initialSection, onClientChanged }) {
   useEffect(() => {
     setLoading(true)
     setError(null)
+    setTimingError(null)
     Promise.all([
       apiRequest(`/clients/${entityId}`),
       apiRequest(`/clients/${entityId}/calculation`),
       apiRequest('/missing-data'),
+      apiRequest(`/clients/${entityId}/payment-timing`).catch((requestError) => {
+        setTimingError(`Payment timing could not be loaded: ${requestError.message}`)
+        return null
+      }),
     ])
-      .then(([clientData, calculationData, missingData]) => {
+      .then(([clientData, calculationData, missingData, timingData]) => {
         setClient(clientData)
         setCalculation(calculationData)
+        setTiming(timingData || clientData.timing_intelligence || null)
         setMissingDocuments(
           missingData.documents.filter((item) => item.company === clientData.entity_name),
         )
@@ -490,7 +665,25 @@ function ClientDetail({ entityId, onBack, initialSection, onClientChanged }) {
               onClick={() => document.getElementById('confidence')?.scrollIntoView({ behavior: 'smooth' })}
             />
           </div>
+          <div>
+            <div className="stat-label">Relationship Manager</div>
+            <div className="stat-value relationship-manager-name">
+              {client.relationship_manager?.name || 'Unassigned'}
+            </div>
+            <div className="manager-meta">
+              {client.relationship_manager?.title}
+              {client.relationship_manager?.email && ` · ${client.relationship_manager.email}`}
+            </div>
+            {client.relationship_manager?.is_mock && (
+              <span className="badge badge-neutral">Mock directory</span>
+            )}
+          </div>
         </div>
+      </section>
+
+      <section className="panel detail-section">
+        <h2>Cash Cycle &amp; Payment Timing</h2>
+        <TimingIntelligence timing={timing} error={timingError} />
       </section>
 
       <section className="panel detail-section" id="confidence">
@@ -581,7 +774,11 @@ function ClientDetail({ entityId, onBack, initialSection, onClientChanged }) {
         <WalletCalculation calculation={calculation?.wallet_calculation} />
       </section>
 
-      <BriefingReport key={client.entity_id} entityId={client.entity_id} />
+      <section className="panel detail-section">
+        <h2>Client Report</h2>
+        <ReportAction client={client} onChanged={onClientChanged} />
+        <p className="view-subtitle">The downloadable report includes the Gemini briefing and a separate formulas page.</p>
+      </section>
     </>
   )
 }
@@ -669,7 +866,11 @@ function App() {
       .finally(() => setLoading(false))
   }
 
-  useEffect(() => { loadDashboard() }, [])
+  useEffect(() => {
+    loadDashboard()
+    const refresh = window.setInterval(loadDashboard, 30000)
+    return () => window.clearInterval(refresh)
+  }, [])
 
   const handleSelectClient = (entityId, section = null) => {
     setSelectedEntityId(entityId)
@@ -686,8 +887,6 @@ function App() {
 
   return (
     <div className="app-shell">
-      <AssistantBar focusedEntityId={view === 'detail' ? selectedEntityId : null} />
-
       <Header
         clientCount={summary?.total_clients || null}
         view={view}
@@ -721,6 +920,7 @@ function App() {
                   <ClientTable
                     clients={clients}
                     onSelectConfidence={handleSelectClient}
+                    onReportChanged={loadDashboard}
                     onSelectClient={
                       focusedPanel === 'table' ? handleSelectClient : () => setFocusedPanel('table')
                     }

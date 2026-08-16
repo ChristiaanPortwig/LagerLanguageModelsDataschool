@@ -12,6 +12,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
 
@@ -25,6 +26,7 @@ from backend.scripts.data_aggregation import (
 )
 from backend.scripts.data_collection import DataCollector
 from backend.scripts.data_processing import Data_Processor
+from backend.scripts.payment_cycles_timing import build_client_timing_intelligence
 from backend.scripts.wallet_size import calculate_total_wallet_size
 
 
@@ -61,6 +63,7 @@ class PipelineService:
         self.client_path = self.data_dir / "client_data.json"
         self.status_path = self.json_dir / "pipeline_status.json"
         self.details_path = self.json_dir / "calculation_details.json"
+        self.timing_path = self.json_dir / "client_timing_intelligence.json"
         self.baseline_path = self.json_dir / "client_baseline.json"
         self.config_path = self.json_dir / "pipeline_config.json"
         self._lock = threading.Lock()
@@ -78,6 +81,11 @@ class PipelineService:
             "new_documents": [],
             "document_issues": [],
             "processing_failures": {},
+            "sens_scoring": {
+                "state": "not_required",
+                "rows_submitted": 0,
+                "rows_remaining": 0,
+            },
             "error": None,
             **(payload if isinstance(payload, dict) else {}),
             "running": self._lock.locked(),
@@ -95,10 +103,22 @@ class PipelineService:
             "state": "running",
             "last_started_at": started,
             "last_scope": scope,
+            "processing_failures": {},
+            "sens_scoring": {
+                "state": "not_required",
+                "rows_submitted": 0,
+                "rows_remaining": 0,
+            },
             "error": None,
         }
         self._write_json(self.status_path, status)
         try:
+            if scrape and not os.getenv("GEMINI_API_KEY"):
+                status["sens_scoring"]["state"] = "failed"
+                raise RuntimeError(
+                    "GEMINI_API_KEY is required before scraping because newly "
+                    "collected SENS documents must be processed immediately"
+                )
             collector = DataCollector()
             processor = Data_Processor()
             external, sens = processor.prepare_incremental_data(
@@ -122,6 +142,49 @@ class PipelineService:
                 process_scope=scope,
                 return_failures=True,
             )
+            status["processing_failures"] = failures
+            failed_sens_companies = sorted(
+                company
+                for company, keywords in failures.items()
+                if any(str(keyword).casefold() == "sens" for keyword in keywords)
+            )
+            if failed_sens_companies:
+                status["sens_scoring"]["state"] = "failed"
+                raise RuntimeError(
+                    "Gemini SENS extraction failed for: "
+                    + ", ".join(failed_sens_companies)
+                )
+
+            # Score SENS immediately after extraction. Do not proceed to
+            # standardisation, aggregation, or frontend publication until
+            # every event has all three Gemini opportunity scores.
+            unscored_sens_rows = self._unscored_sens_row_count(sens)
+            if unscored_sens_rows and not os.getenv("GEMINI_API_KEY"):
+                status["sens_scoring"]["state"] = "failed"
+                raise RuntimeError(
+                    f"{unscored_sens_rows} SENS rows require Gemini scoring, but "
+                    "GEMINI_API_KEY is not configured"
+                )
+            if unscored_sens_rows:
+                status["sens_scoring"] = {
+                    "state": "running",
+                    "rows_submitted": unscored_sens_rows,
+                    "rows_remaining": unscored_sens_rows,
+                }
+                self._write_json(self.status_path, status)
+                sens = processor.score_sens_opportunities(sens)
+                remaining_sens_rows = self._unscored_sens_row_count(sens)
+                if remaining_sens_rows:
+                    raise RuntimeError(
+                        "Gemini SENS scoring was incomplete: "
+                        f"{remaining_sens_rows} of {unscored_sens_rows} submitted rows "
+                        "still have missing opportunity scores"
+                    )
+            status["sens_scoring"] = {
+                "state": "complete",
+                "rows_submitted": unscored_sens_rows,
+                "rows_remaining": 0,
+            }
             processed_paths = sorted(
                 str(path)
                 for paths in processor.last_extraction_status.values()
@@ -135,13 +198,6 @@ class PipelineService:
                 external, sens = processor.validate_external_data(external, sens)
                 external, sens = processor.standardize_data(external, sens)
 
-            if os.getenv("GEMINI_API_KEY"):
-                sens = processor.score_sens_opportunities(sens)
-            else:
-                LOGGER.warning(
-                    "GEMINI_API_KEY is not set; missing SENS opportunity scores "
-                    "remain available for manual update"
-                )
             processor.save_current_data(external, sens, json_location=self.json_dir)
             records = self.aggregate(external, sens)
 
@@ -158,6 +214,11 @@ class PipelineService:
             return status
         except Exception as error:
             LOGGER.exception("Pipeline run failed")
+            if status.get("sens_scoring", {}).get("state") == "running":
+                status["sens_scoring"] = {
+                    **status["sens_scoring"],
+                    "state": "failed",
+                }
             status.update({
                 "state": "failed",
                 "last_completed_at": self._now(),
@@ -215,6 +276,13 @@ class PipelineService:
                 sens,
             ),
         )
+        timing_payload = self.timing_intelligence()
+        timing_by_entity = {
+            str(item.get("entity_id")): item
+            for item in timing_payload.get("clients", [])
+        }
+        for record in records:
+            record["timing_intelligence"] = timing_by_entity.get(record["entity_id"])
         save_dashboard_clients_to_json(records, self.client_path)
         self._write_json(
             self.details_path,
@@ -223,9 +291,88 @@ class PipelineService:
                 "score_weights": weights,
                 "wallet": details,
                 "missing_data_keywords": missing,
+                "timing_generated_at": timing_payload.get("generated_at"),
             },
         )
         return records
+
+    def timing_intelligence(
+        self,
+        *,
+        force: bool = False,
+        reference_date: str | None = None,
+    ) -> dict[str, Any]:
+        """Return cached timing intelligence, refreshing when a contact date arrives."""
+        reference = pd.Timestamp(reference_date or self._business_date()).normalize()
+        signature = self._ledger_signature()
+        gemini_requested = bool(os.getenv("GEMINI_API_KEY"))
+        cached = self._read_json(self.timing_path, {})
+        cache_matches = (
+            isinstance(cached, dict)
+            and cached.get("source_signature") == signature
+            and cached.get("gemini_requested") == gemini_requested
+            and isinstance(cached.get("clients"), list)
+            and bool(cached.get("clients"))
+        )
+        if cache_matches and not force and not self._timing_refresh_due(cached, reference):
+            return cached
+
+        records = build_client_timing_intelligence(
+            self.data_dir,
+            reference_date=reference,
+        )
+        eligible = [
+            item for item in records
+            if item.get("payment_timing", {}).get("predicted_payment_date")
+        ]
+        gemini_count = sum(
+            item.get("engagement_prediction", {}).get("generated_by") == "gemini"
+            for item in eligible
+        )
+        if not eligible:
+            prediction_mode = "not_applicable"
+        elif gemini_count == len(eligible):
+            prediction_mode = "gemini"
+        elif gemini_count:
+            prediction_mode = "gemini_partial"
+        else:
+            prediction_mode = "rules_fallback"
+        payload = {
+            "generated_at": self._now(),
+            "generated_for_date": reference.date().isoformat(),
+            "prediction_mode": prediction_mode,
+            "gemini_requested": gemini_requested,
+            "source_signature": signature,
+            "clients": records,
+        }
+        self._write_json(self.timing_path, payload)
+        return payload
+
+    @staticmethod
+    def _timing_refresh_due(payload: dict[str, Any], reference: pd.Timestamp) -> bool:
+        """Refresh once per date when a cached engagement or payment date is reached."""
+        generated_for = pd.to_datetime(payload.get("generated_for_date"), errors="coerce")
+        if not pd.isna(generated_for) and generated_for.normalize() >= reference:
+            return False
+        for client in payload.get("clients", []):
+            engagement = client.get("engagement_prediction", {}).get(
+                "recommended_engagement_date"
+            )
+            payment = client.get("payment_timing", {}).get("predicted_payment_date")
+            for candidate in (engagement, payment):
+                parsed = pd.to_datetime(candidate, errors="coerce")
+                if not pd.isna(parsed) and parsed.normalize() <= reference:
+                    return True
+        return False
+
+    @staticmethod
+    def _business_date():
+        timezone_name = os.getenv("TIMING_TIMEZONE", "Africa/Johannesburg")
+        try:
+            business_timezone = ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError:
+            business_timezone = timezone.utc
+        return datetime.now(business_timezone).date()
 
     def missing_data(self) -> dict[str, Any]:
         details = self._read_json(self.details_path, {})
@@ -241,10 +388,21 @@ class PipelineService:
                 for client in clients
                 if client.get("missing_data", {}).get("fields")
             ],
-            "opportunity_scores": self._missing_opportunity_scores(),
             "last_pipeline_issues": self.status().get("document_issues", []),
+            "sens_scoring": self.status().get("sens_scoring", {}),
             "generated_at": details.get("generated_at"),
         }
+
+    @staticmethod
+    def _unscored_sens_row_count(sens: pd.DataFrame) -> int:
+        if not isinstance(sens, pd.DataFrame) or sens.empty:
+            return 0
+        missing = pd.Series(False, index=sens.index)
+        for column in SCORE_COLUMNS:
+            if column not in sens:
+                return len(sens)
+            missing |= pd.to_numeric(sens[column], errors="coerce").isna()
+        return int(missing.sum())
 
     def update_external_fields(self, company: str, values: dict[str, Any]) -> list:
         if not values:
@@ -317,7 +475,7 @@ class PipelineService:
                     raise ValueError(f"{field} must be between 0 and 1")
                 if field not in sens.columns:
                     sens[field] = pd.NA
-                sens.at[matches[0], field] = float(value)
+                sens.loc[matches, field] = float(value)
             processor.save_current_data(external, sens, json_location=self.json_dir)
             return self.aggregate(external, sens)
         finally:
@@ -543,21 +701,26 @@ class PipelineService:
         sens = Data_Processor._read_dataframe(
             self.json_dir / Data_Processor.SENS_DATA_FILE
         )
-        missing = []
+        missing_by_id = {}
         for _, row in sens.iterrows():
             fields = [
                 column for column in SCORE_COLUMNS
                 if column not in sens.columns or pd.isna(row.get(column))
             ]
             if fields:
-                missing.append({
-                    "record_id": self.opportunity_record_id(row),
+                record_id = self.opportunity_record_id(row)
+                record = missing_by_id.setdefault(record_id, {
+                    "record_id": record_id,
                     "company": row.get("company"),
                     "announcement_date": self._json_scalar(row.get("announcement_date")),
                     "title": row.get("title"),
-                    "missing_fields": fields,
+                    "missing_fields": set(),
                 })
-        return missing
+                record["missing_fields"].update(fields)
+        return [
+            {**record, "missing_fields": sorted(record["missing_fields"])}
+            for record in missing_by_id.values()
+        ]
 
     def _missing_documents(self):
         current_year = datetime.now(timezone.utc).year
