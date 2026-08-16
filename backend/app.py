@@ -226,7 +226,7 @@ def create_client_briefing(client_id: str):
     prompt = build_briefing_prompt(client)
 
     client = Gemini_Client()
-    output = client.call_gemini_ustructured(prompt=prompt)
+    output = client.call_gemini_ustructured(prompt=prompt, system_instruction=SYSTEM_INSTRUCTION)
     print(f"Gemini request made\nOutput:\n{output}")
     return {"report": output}
 
