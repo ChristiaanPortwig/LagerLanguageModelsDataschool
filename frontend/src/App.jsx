@@ -28,20 +28,115 @@ import { formatPercent, formatScore, formatZarAbbreviated, formatZarFull } from 
 // index.css. refinancing_flag has only two values so it stays within the
 // palette's validated series cap for scatter charts (sector, at 7 values,
 // would exceed it).
-const isDarkMode =
-  typeof window !== 'undefined' &&
-  window.matchMedia?.('(prefers-color-scheme: dark)').matches
+//
+// Recharts fills are plain SVG attributes, not CSS - they can't read the
+// --accent/--series-2 custom properties the rest of the app uses, so the
+// same two color steps are duplicated here per theme and picked by
+// OpportunityHeatmap by the resolved theme (see useTheme below), instead of
+// being computed once at module load like before the toggle existed.
 const REFI_COLORS = {
-  true: isDarkMode ? '#c9682f' : '#c1622e', // slot 2, warm terracotta
-  false: isDarkMode ? '#2f8fe0' : '#005199', // slot 1, Standard Bank blue
+  dark: { true: '#c9682f', false: '#2f8fe0' }, // slot 2 terracotta, slot 1 blue
+  light: { true: '#c1622e', false: '#005199' },
 }
 const CHART_INK = {
-  grid: isDarkMode ? '#2c2c2a' : '#e1e0d9',
-  axis: '#898781',
-  surface: isDarkMode ? '#1a1a19' : '#fcfcfb',
+  dark: { grid: '#2c2c2a', axis: '#898781', surface: '#1a1a19' },
+  light: { grid: '#e1e0d9', axis: '#898781', surface: '#fcfcfb' },
 }
 
-function Header({ clientCount, view, onNavigate }) {
+// Must match the inline blocking script in index.html that sets this
+// attribute before first paint (to avoid a flash of the wrong theme).
+const THEME_STORAGE_KEY = 'sow-dashboard-theme'
+
+function getSystemTheme() {
+  if (typeof window === 'undefined' || !window.matchMedia) return 'light'
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
+function getStoredTheme() {
+  if (typeof window === 'undefined') return null
+  try {
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY)
+    return stored === 'light' || stored === 'dark' ? stored : null
+  } catch {
+    return null // localStorage unavailable (e.g. private browsing) - fall back to system
+  }
+}
+
+/**
+ * Resolves the active theme (stored manual choice, else system preference)
+ * and keeps <html data-theme="..."> in sync so index.css's
+ * :root[data-theme] rules can key off it. Until the user makes an explicit
+ * choice, live OS theme changes keep updating the app, matching the old
+ * prefers-color-scheme-only behavior; toggling stops that and persists the
+ * manual choice across reloads.
+ */
+function useTheme() {
+  const [theme, setTheme] = useState(() => getStoredTheme() ?? getSystemTheme())
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+  }, [theme])
+
+  useEffect(() => {
+    const media = window.matchMedia?.('(prefers-color-scheme: dark)')
+    if (!media) return
+    const handleChange = (event) => {
+      if (getStoredTheme()) return // user has an explicit choice - ignore OS changes
+      setTheme(event.matches ? 'dark' : 'light')
+    }
+    media.addEventListener('change', handleChange)
+    return () => media.removeEventListener('change', handleChange)
+  }, [])
+
+  const toggleTheme = () => {
+    setTheme((current) => {
+      const next = current === 'dark' ? 'light' : 'dark'
+      try {
+        window.localStorage.setItem(THEME_STORAGE_KEY, next)
+      } catch {
+        // Persistence is best-effort; the toggle still works for this session.
+      }
+      return next
+    })
+  }
+
+  return [theme, toggleTheme]
+}
+
+function SunIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <circle cx="12" cy="12" r="4.5" />
+      <path d="M12 2.5v2.5M12 19v2.5M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M2.5 12H5M19 12h2.5M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8" />
+    </svg>
+  )
+}
+
+function MoonIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" stroke="none">
+      <path d="M20.3 14.9A8.5 8.5 0 1 1 9.1 3.7a7 7 0 0 0 11.2 11.2Z" />
+    </svg>
+  )
+}
+
+function ThemeToggle({ theme, onToggle }) {
+  const isDark = theme === 'dark'
+  return (
+    <button
+      type="button"
+      className="theme-toggle"
+      onClick={onToggle}
+      aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+      aria-pressed={isDark}
+      title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+    >
+      {isDark ? <SunIcon /> : <MoonIcon />}
+    </button>
+  )
+}
+
+function Header({ clientCount, view, onNavigate, theme, onToggleTheme }) {
   const links = [
     ['grid', 'Dashboard'],
     ['data', 'Data gaps'],
@@ -67,6 +162,7 @@ function Header({ clientCount, view, onNavigate }) {
         {clientCount != null && (
           <span className="app-header-meta">{clientCount} corporate clients</span>
         )}
+        <ThemeToggle theme={theme} onToggle={onToggleTheme} />
       </div>
     </header>
   )
@@ -257,11 +353,13 @@ function HeatmapTooltip({ active, payload }) {
   )
 }
 
-function OpportunityHeatmap({ clients, onSelectClient, compact = false }) {
+function OpportunityHeatmap({ clients, onSelectClient, compact = false, theme }) {
   const refinancing = clients.filter((c) => c.refinancing_flag)
   const notRefinancing = clients.filter((c) => !c.refinancing_flag)
   const height = compact ? 240 : 480
   const tickFontSize = compact ? 11 : 12
+  const refiColors = REFI_COLORS[theme]
+  const chartInk = CHART_INK[theme]
 
   return (
     <>
@@ -275,38 +373,38 @@ function OpportunityHeatmap({ clients, onSelectClient, compact = false }) {
       <div className={`panel chart-card ${compact ? 'chart-card-compact' : ''}`}>
         <ResponsiveContainer width="100%" height={height}>
           <ScatterChart margin={{ top: 8, right: 16, bottom: 8, left: 8 }}>
-            <CartesianGrid stroke={CHART_INK.grid} />
+            <CartesianGrid stroke={chartInk.grid} />
             <XAxis
               type="number"
               dataKey="wallet_gap_zar"
               name="Wallet Gap (ZAR)"
-              stroke={CHART_INK.axis}
-              tick={{ fontSize: tickFontSize, fill: CHART_INK.axis }}
+              stroke={chartInk.axis}
+              tick={{ fontSize: tickFontSize, fill: chartInk.axis }}
               tickFormatter={(v) => formatZarAbbreviated(v)}
             />
             <YAxis
               type="number"
               dataKey="opportunity_score"
               name="Opportunity Score"
-              stroke={CHART_INK.axis}
-              tick={{ fontSize: tickFontSize, fill: CHART_INK.axis }}
+              stroke={chartInk.axis}
+              tick={{ fontSize: tickFontSize, fill: chartInk.axis }}
             />
             <Tooltip
-              cursor={{ strokeDasharray: '3 3', stroke: CHART_INK.axis }}
+              cursor={{ strokeDasharray: '3 3', stroke: chartInk.axis }}
               content={<HeatmapTooltip />}
             />
             <Legend wrapperStyle={{ fontSize: 12, paddingTop: 8 }} />
             <Scatter
               name="Refinancing: false"
               data={notRefinancing}
-              fill={REFI_COLORS.false}
+              fill={refiColors.false}
               onClick={(point) => onSelectClient(point.entity_id)}
               cursor="pointer"
             />
             <Scatter
               name="Refinancing: true"
               data={refinancing}
-              fill={REFI_COLORS.true}
+              fill={refiColors.true}
               onClick={(point) => onSelectClient(point.entity_id)}
               cursor="pointer"
             />
@@ -474,7 +572,7 @@ function ProactiveFlags({ flags, onSelectClient, compact = false }) {
                         active
                         variant="serious"
                         activeLabel={
-                          client.import_trade_finance_gap.coverage_pct == null
+                          client.import_trade_finance_gap?.coverage_pct == null
                             ? 'No captured cover'
                             : `${client.import_trade_finance_gap.coverage_pct}% covered`
                         }
@@ -482,9 +580,9 @@ function ProactiveFlags({ flags, onSelectClient, compact = false }) {
                     </td>
                     <td
                       className="numeric"
-                      title={formatZarFull(client.import_trade_finance_gap.estimated_gap_zar)}
+                      title={formatZarFull(client.import_trade_finance_gap?.estimated_gap_zar)}
                     >
-                      {formatZarAbbreviated(client.import_trade_finance_gap.estimated_gap_zar)}
+                      {formatZarAbbreviated(client.import_trade_finance_gap?.estimated_gap_zar)}
                     </td>
                   </tr>
                 ))}
@@ -841,6 +939,7 @@ function DashboardPanel({
 }
 
 function App() {
+  const [theme, toggleTheme] = useTheme()
   const [clients, setClients] = useState([])
   const [summary, setSummary] = useState(null)
   const [proactiveFlags, setProactiveFlags] = useState(null)
@@ -891,6 +990,8 @@ function App() {
         clientCount={summary?.total_clients || null}
         view={view}
         onNavigate={handleNavigate}
+        theme={theme}
+        onToggleTheme={toggleTheme}
       />
 
       <div className="view-container">
@@ -944,6 +1045,7 @@ function App() {
                         : () => setFocusedPanel('heatmap')
                     }
                     compact={focusedPanel !== 'heatmap'}
+                    theme={theme}
                   />
                 </DashboardPanel>
 

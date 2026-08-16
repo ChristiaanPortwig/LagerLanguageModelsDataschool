@@ -5,6 +5,27 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Share of Wallet Dashboard</title>
+    <script>
+      // Sets data-theme before first paint, so the page renders in the
+      // right mode immediately instead of flashing light-then-dark (or vice
+      // versa) once App.jsx's useTheme hook runs. The storage key must match
+      // THEME_STORAGE_KEY in src/App.jsx.
+      (function () {
+        try {
+          var stored = localStorage.getItem('sow-dashboard-theme')
+          var theme =
+            stored === 'light' || stored === 'dark'
+              ? stored
+              : window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark'
+                : 'light'
+          document.documentElement.dataset.theme = theme
+        } catch (e) {
+          // localStorage unavailable (e.g. private browsing) - the
+          // prefers-color-scheme media query in index.css still applies.
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>
