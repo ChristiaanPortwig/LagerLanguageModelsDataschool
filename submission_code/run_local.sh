@@ -29,9 +29,9 @@ JSON_DOWNLOADS=(
 # These filenames must match json/report_manifest.json. Replace the three URL
 # placeholders with the public Google Drive links after uploading the reports.
 REPORT_DOWNLOADS=(
-  "PASTE_GLENCORE_REPORT_URL_HERE|reports/E02-Glencore-briefing.html"
-  "PASTE_BHP_GROUP_REPORT_URL_HERE|reports/E01-BHP_Group-briefing.html"
-  "PASTE_BID_CORPORATION_REPORT_URL_HERE|reports/E10-Bid_Corporation-briefing.html"
+  "https://drive.google.com/file/d/1x5rHcVpyLIqvy431nO-bhZ50mUMSiotU/view?usp=sharing|reports/E02-Glencore-briefing.html"
+  "https://drive.google.com/file/d/1xmVWIFN2LmhDicESJZseC0baYtrius0v/view?usp=sharing|reports/E01-BHP_Group-briefing.html"
+  "https://drive.google.com/file/d/1FJMAYiXhr7Wiups017oJIazC_7s7gK0W/view?usp=sharing|reports/E10-Bid_Corporation-briefing.html"
 )
 
 log() {
