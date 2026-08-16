@@ -2,6 +2,8 @@
 
 FastAPI, scheduled collection/processing, and a React dashboard for corporate-client wallet opportunities.
 
+**For instructions on how the backend can be started, move to local development.**
+
 ## Run the backend with Docker
 
 Place the three bank ledgers and persisted pipeline data under `data/`:
@@ -9,9 +11,9 @@ Place the three bank ledgers and persisted pipeline data under `data/`:
 - `transactional_banking.csv`
 - `cross_border_payments.csv`
 - `trade_finance.csv`
-- `client_data.json`
-- `json/current_external_data.json`
-- `json/current_sens_data.json`
+- `client_data.json(can be empty)`
+- `json/current_external_data.json(can be empty)`
+- `json/current_sens_data.json(can be empty)`
 - `downloads/` (created automatically)
 
 Set `GEMINI_API_KEY` in your shell or a root `.env`, then run:

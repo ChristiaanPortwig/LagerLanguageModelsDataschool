@@ -229,6 +229,10 @@ data/*
 *.csv
 *.parquet
 backend/.env
+<<<<<<< HEAD
 
 # Submission notebook data
 submission_code/data/
+=======
+!*.json
+>>>>>>> a059247 (feat: write shell script)
