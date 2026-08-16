@@ -426,7 +426,7 @@ def _payments(row: pd.Series) -> _Estimate:
             ),
         ),
         ("B", _sum_calculation(row, "cost_of_sales", "employee_expenses")),
-        ("C", _direct_calculation(row, "revenue")),
+        ("C", _scale_calculation(row, "revenue", 0.5)),
     )
 
 
@@ -434,7 +434,7 @@ def _collections(row: pd.Series) -> _Estimate:
     return _choose(
         ("A", _direct_calculation(row, "collections_value", "revenue")),
         ("B", _direct_calculation(row, "adjusted_collections_value")),
-        ("C", _direct_calculation(row, "revenue")),
+        ("C", _scale_calculation(row, "revenue", 0.5)),
     )
 
 
@@ -733,6 +733,19 @@ def _add_calculation(
     row: pd.Series, left_name: str, right_name: str
 ) -> _Calculation:
     return _sum_calculation(row, left_name, right_name)
+
+
+def _scale_calculation(
+    row: pd.Series, value_name: str, factor: float
+) -> _Calculation:
+    value = _value(row, value_name)
+    if value is None:
+        return _Calculation(None, None, {})
+    return _Calculation(
+        factor * value,
+        f"{factor:g} * {value_name}",
+        {value_name: value},
+    )
 
 
 def _multiply_calculation(

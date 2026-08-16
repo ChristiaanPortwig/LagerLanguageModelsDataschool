@@ -36,10 +36,10 @@ class WalletSizeTests(unittest.TestCase):
         result = calculate_total_wallet_size(companies)
 
         self.assertEqual(result.index.tolist(), ["Example Ltd"])
-        self.assertEqual(result.loc["Example Ltd", "transactional_banking"], 2_075)
+        self.assertEqual(result.loc["Example Ltd", "transactional_banking"], 1_575)
         self.assertEqual(result.loc["Example Ltd", "global_markets"], 250)
         self.assertEqual(result.loc["Example Ltd", "investment_banking"], 350)
-        self.assertEqual(result.loc["Example Ltd", "total"], 2_675)
+        self.assertEqual(result.loc["Example Ltd", "total"], 2_175)
         self.assertEqual(
             result.loc["Example Ltd", "transactional_banking_confidence"], "low"
         )
@@ -66,7 +66,7 @@ class WalletSizeTests(unittest.TestCase):
         ) as logs:
             result = calculate_total_wallet_size(companies).loc["Sparse Ltd"]
 
-        self.assertEqual(result["transactional_banking"], 200)
+        self.assertEqual(result["transactional_banking"], 100)
         self.assertEqual(result["transactional_banking_confidence"], "low")
         self.assertTrue(pd.isna(result["global_markets"]))
         self.assertEqual(result["global_markets_confidence"], "can't estimate")
@@ -120,9 +120,18 @@ class WalletSizeTests(unittest.TestCase):
             sparse_formulas["products"]["payments"],
             {
                 "tier": "C",
-                "formula": "revenue",
+                "formula": "0.5 * revenue",
                 "inputs": {"revenue": 100.0},
-                "value": 100.0,
+                "value": 50.0,
+            },
+        )
+        self.assertEqual(
+            sparse_formulas["products"]["collections"],
+            {
+                "tier": "C",
+                "formula": "0.5 * revenue",
+                "inputs": {"revenue": 100.0},
+                "value": 50.0,
             },
         )
         self.assertEqual(
