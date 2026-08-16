@@ -12,6 +12,16 @@
    --header-* tokens are brand chrome: fixed to the primary blue gradient in
    both modes (a bank's header bar doesn't invert to black), independent of
    --accent/--accent-secondary which adapt per mode for interactive UI.
+
+   Theme mechanism: :root holds the light values (the default look). Dark
+   values are declared once and applied two ways so a manual toggle can win
+   over the OS setting in either direction:
+     - via the media query, guarded with :not([data-theme="light"]) so an
+       explicit light choice isn't overridden by a dark OS preference;
+     - via :root[data-theme="dark"], unconditionally, so an explicit dark
+       choice applies even under a light OS preference.
+   JS (App.jsx) only ever sets/clears documentElement's data-theme attribute;
+   no component reads or writes these custom properties directly.
 ------------------------------------------------------------------------ */
 
 :root {
@@ -48,7 +58,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
     --surface-1: #151a24; /* dark navy, blue-tinted instead of neutral charcoal */
     --page-plane: #0a0d14; /* near-black navy, blue-tinted instead of neutral black */
     --text-primary: #ffffff;
@@ -71,6 +81,30 @@
     --status-warning-ink: #ffd479;
     --status-serious-ink: #ffb499;
   }
+}
+
+/* Explicit dark choice (via the toggle), applied regardless of OS
+   preference. Same values as the media-query block above - keep both in
+   sync if these ever change. */
+:root[data-theme='dark'] {
+  --surface-1: #151a24; /* dark navy, blue-tinted instead of neutral charcoal */
+  --page-plane: #0a0d14; /* near-black navy, blue-tinted instead of neutral black */
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --gridline: #2c2c2a;
+  --baseline: #383835;
+  --border-hairline: rgba(255, 255, 255, 0.1);
+  --panel-border: rgba(47, 143, 224, 0.24);
+  --panel-glow: 0 0 0 1px rgba(47, 143, 224, 0.06), 0 6px 20px rgba(47, 143, 224, 0.08);
+
+  --accent: #2f8fe0;
+  --accent-secondary: #1a56c4;
+  --accent-wash: rgba(47, 143, 224, 0.12);
+  --series-2: #c9682f;
+
+  --status-warning-ink: #ffd479;
+  --status-serious-ink: #ffb499;
 }
 
 * {
@@ -158,6 +192,34 @@ button {
   color: var(--header-text);
   border-color: rgba(255, 255, 255, 0.3);
   background: rgba(255, 255, 255, 0.08);
+}
+
+.theme-toggle {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--header-text);
+  cursor: pointer;
+  transition:
+    background 0.2s ease,
+    border-color 0.2s ease;
+}
+
+.theme-toggle:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.45);
+}
+
+.theme-toggle svg {
+  width: 16px;
+  height: 16px;
 }
 
 .view-container {
